@@ -1,5 +1,6 @@
 package com.moneytracker
 
+import android.content.Context
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -15,6 +16,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -30,6 +32,8 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.GoogleAuthProvider
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.SetOptions
+import com.moneytracker.ui.MainScreen
 import com.moneytracker.ui.theme.MoneyTrackerTheme
 import kotlin.random.Random
 
@@ -45,6 +49,55 @@ class MainActivity : ComponentActivity() {
             var userId by remember { mutableStateOf(auth.currentUser?.uid ?: "") }
             var familyId by remember { mutableStateOf<String?>(null) }
             var familyName by remember { mutableStateOf<String?>(null) }
+            var isResolvingFamily by remember { mutableStateOf(false) }
+            val context = LocalContext.current
+
+            LaunchedEffect(Unit) {
+                if (auth.currentUser == null) {
+                    val savedUser = loadPrototypeUser(context)
+                    if (savedUser != null) {
+                        signedInLabel = savedUser.first
+                        userId = savedUser.second
+                        isSignedIn = true
+                    }
+                }
+            }
+
+            LaunchedEffect(isSignedIn, userId) {
+                if (!isSignedIn || userId.isBlank() || familyId != null) {
+                    return@LaunchedEffect
+                }
+                val cached = loadFamilySelection(context, userId)
+                if (cached != null) {
+                    familyId = cached.first
+                    familyName = cached.second
+                    return@LaunchedEffect
+                }
+                isResolvingFamily = true
+                val db = FirebaseFirestore.getInstance()
+                db.collection("users").document(userId).get()
+                    .addOnSuccessListener { userDoc ->
+                        val foundFamilyId = userDoc.getString("familyId")
+                        if (foundFamilyId.isNullOrBlank()) {
+                            isResolvingFamily = false
+                            return@addOnSuccessListener
+                        }
+                        db.collection("families").document(foundFamilyId).get()
+                            .addOnSuccessListener { famDoc ->
+                                val name = famDoc.getString("name") ?: "Family"
+                                saveFamilySelection(context, userId, foundFamilyId, name)
+                                familyId = foundFamilyId
+                                familyName = name
+                                isResolvingFamily = false
+                            }
+                            .addOnFailureListener {
+                                isResolvingFamily = false
+                            }
+                    }
+                    .addOnFailureListener {
+                        isResolvingFamily = false
+                    }
+            }
 
             MoneyTrackerTheme {
                 Surface(
@@ -53,18 +106,23 @@ class MainActivity : ComponentActivity() {
                 ) {
                     if (isSignedIn) {
                         if (familyId == null) {
-                            FamilyScreen(
-                                userId = userId,
-                                onFamilyReady = { id, name ->
-                                    familyId = id
-                                    familyName = name
-                                },
-                                onError = { message ->
-                                    Toast.makeText(this, message, Toast.LENGTH_LONG).show()
-                                }
-                            )
+                            if (isResolvingFamily) {
+                                LoadingScreen()
+                            } else {
+                                FamilyScreen(
+                                    userId = userId,
+                                    onFamilyReady = { id, name ->
+                                        saveFamilySelection(context, userId, id, name)
+                                        familyId = id
+                                        familyName = name
+                                    },
+                                    onError = { message ->
+                                        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+                                    }
+                                )
+                            }
                         } else {
-                            HomeScreen(
+                            MainScreen(
                                 signedInLabel = signedInLabel,
                                 familyName = familyName ?: "Family"
                             )
@@ -75,6 +133,9 @@ class MainActivity : ComponentActivity() {
                                 signedInLabel = label
                                 userId = id
                                 isSignedIn = true
+                                if (id.startsWith("email:")) {
+                                    savePrototypeUser(context, id, label)
+                                }
                                 Toast.makeText(this, "Signed in", Toast.LENGTH_SHORT).show()
                             },
                             onSignInError = { message ->
@@ -232,6 +293,7 @@ private fun FamilyScreen(
                             db.collection("invites").document(inviteCode)
                                 .set(inviteData)
                                 .addOnSuccessListener {
+                                    updateUserFamily(db, userId, newFamilyId, onError)
                                     onFamilyReady(newFamilyId, name)
                                     Toast.makeText(
                                         context,
@@ -288,6 +350,7 @@ private fun FamilyScreen(
                                     db.collection("families").document(foundFamilyId).get()
                                         .addOnSuccessListener { fam ->
                                             val name = fam.getString("name") ?: "Family"
+                                            updateUserFamily(db, userId, foundFamilyId, onError)
                                             onFamilyReady(foundFamilyId, name)
                                         }
                                 }
@@ -307,15 +370,78 @@ private fun FamilyScreen(
 }
 
 @Composable
-private fun HomeScreen(signedInLabel: String, familyName: String) {
+private fun LoadingScreen() {
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(text = "MoneyTracker MVP")
-            Text(
-                text = "Welcome, $signedInLabel",
-                modifier = Modifier.padding(top = 8.dp, bottom = 8.dp)
-            )
-            Text(text = "Family: $familyName")
-        }
+        Text(text = "Loading your family...")
     }
+}
+
+private const val PREFS_NAME = "moneytracker_prefs"
+private const val PREFS_KEY_AUTH_PROVIDER = "authProvider"
+private const val PREFS_KEY_USER_ID = "userId"
+private const val PREFS_KEY_USER_LABEL = "userLabel"
+private const val AUTH_PROVIDER_PROTOTYPE = "prototype_email"
+
+private fun familyIdKey(userId: String) = "familyId:$userId"
+private fun familyNameKey(userId: String) = "familyName:$userId"
+
+private fun loadFamilySelection(context: Context, userId: String): Pair<String, String?>? {
+    val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    val familyId = prefs.getString(familyIdKey(userId), null) ?: return null
+    val familyName = prefs.getString(familyNameKey(userId), null)
+    return familyId to familyName
+}
+
+private fun saveFamilySelection(
+    context: Context,
+    userId: String,
+    familyId: String,
+    familyName: String?
+) {
+    val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    val editor = prefs.edit()
+        .putString(familyIdKey(userId), familyId)
+    if (familyName.isNullOrBlank()) {
+        editor.remove(familyNameKey(userId))
+    } else {
+        editor.putString(familyNameKey(userId), familyName)
+    }
+    editor.apply()
+}
+
+private fun savePrototypeUser(context: Context, userId: String, label: String) {
+    val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    prefs.edit()
+        .putString(PREFS_KEY_AUTH_PROVIDER, AUTH_PROVIDER_PROTOTYPE)
+        .putString(PREFS_KEY_USER_ID, userId)
+        .putString(PREFS_KEY_USER_LABEL, label)
+        .apply()
+}
+
+private fun loadPrototypeUser(context: Context): Pair<String, String>? {
+    val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    val provider = prefs.getString(PREFS_KEY_AUTH_PROVIDER, null)
+    if (provider != AUTH_PROVIDER_PROTOTYPE) {
+        return null
+    }
+    val userId = prefs.getString(PREFS_KEY_USER_ID, null) ?: return null
+    val label = prefs.getString(PREFS_KEY_USER_LABEL, userId) ?: userId
+    return label to userId
+}
+
+private fun updateUserFamily(
+    db: FirebaseFirestore,
+    userId: String,
+    familyId: String,
+    onError: (String) -> Unit
+) {
+    val data = mapOf(
+        "familyId" to familyId,
+        "updatedAt" to FieldValue.serverTimestamp()
+    )
+    db.collection("users").document(userId)
+        .set(data, SetOptions.merge())
+        .addOnFailureListener { e ->
+            onError(e.message ?: "Failed to save user profile")
+        }
 }

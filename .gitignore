@@ -137,3 +137,5 @@ app/google-services.json
 *.jks
 *.keystore
 *.pem
+.idea/
+*.iml
