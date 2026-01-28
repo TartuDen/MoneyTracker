@@ -1,6 +1,7 @@
 package com.moneytracker.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,26 +12,70 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextField
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.ContentTransform
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccountCircle
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.ListAlt
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Payments
+import androidx.compose.material.icons.filled.PersonAdd
+import androidx.compose.material.icons.filled.RadioButtonUnchecked
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.AlertDialog
+import androidx.compose.ui.platform.LocalContext
+import android.widget.Toast
+import com.google.firebase.Timestamp
+import com.google.firebase.firestore.FieldValue
+import com.google.firebase.firestore.FirebaseFirestore
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 private data class AppTab(
     val key: String,
@@ -38,9 +83,33 @@ private data class AppTab(
     val shortLabel: String
 )
 
+private data class ListDoc(val id: String, val name: String)
+private data class ListItemDoc(
+    val id: String,
+    val name: String,
+    val listId: String,
+    val status: String?,
+    val assignedTo: String?,
+    val updatedAt: Timestamp?,
+    val createdAt: Timestamp?
+)
+private data class ExpenseDoc(
+    val id: String,
+    val amount: Double,
+    val category: String?,
+    val date: Timestamp?
+)
+private data class UserDoc(val id: String, val displayName: String?)
+private data class ActivityEntry(val label: String, val timestamp: Timestamp)
+
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
-fun MainScreen(signedInLabel: String, familyName: String) {
+fun MainScreen(
+    signedInLabel: String,
+    familyName: String,
+    familyId: String?,
+    userId: String
+) {
     val tabs = remember {
         listOf(
             AppTab("home", "Home", "H"),
@@ -50,6 +119,186 @@ fun MainScreen(signedInLabel: String, familyName: String) {
         )
     }
     var selectedTab by remember { mutableStateOf(tabs.first().key) }
+    var selectedListId by remember { mutableStateOf<String?>(null) }
+    var listLimit by remember { mutableStateOf(50) }
+    var itemLimit by remember { mutableStateOf(100) }
+    var expenseLimit by remember { mutableStateOf(50) }
+    var isCreateListOpen by remember { mutableStateOf(false) }
+    var isAddExpenseOpen by remember { mutableStateOf(false) }
+    var isProfileMenuOpen by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    val db = remember { FirebaseFirestore.getInstance() }
+
+    var lists by remember { mutableStateOf<List<ListDoc>>(emptyList()) }
+    var listItems by remember { mutableStateOf<List<ListItemDoc>>(emptyList()) }
+    var expenses by remember { mutableStateOf<List<ExpenseDoc>>(emptyList()) }
+    var members by remember { mutableStateOf<List<UserDoc>>(emptyList()) }
+    var listsLoaded by remember { mutableStateOf(false) }
+    var itemsLoaded by remember { mutableStateOf(false) }
+    var expensesLoaded by remember { mutableStateOf(false) }
+    var membersLoaded by remember { mutableStateOf(false) }
+    var useItemsOrderBy by remember { mutableStateOf(true) }
+    var useExpensesOrderBy by remember { mutableStateOf(true) }
+
+    LaunchedEffect(familyId) {
+        useItemsOrderBy = true
+        useExpensesOrderBy = true
+    }
+
+    DisposableEffect(
+        familyId,
+        listLimit,
+        itemLimit,
+        expenseLimit,
+        useItemsOrderBy,
+        useExpensesOrderBy
+    ) {
+        if (familyId.isNullOrBlank()) {
+            lists = emptyList()
+            listItems = emptyList()
+            expenses = emptyList()
+            members = emptyList()
+            listsLoaded = false
+            itemsLoaded = false
+            expensesLoaded = false
+            membersLoaded = false
+            selectedListId = null
+            return@DisposableEffect onDispose {}
+        }
+
+
+        val listsReg = db.collection("lists")
+            .whereEqualTo("familyId", familyId)
+            .limit(listLimit.toLong())
+            .addSnapshotListener { snapshot, error ->
+                if (error != null) {
+                    listsLoaded = true
+                    Toast.makeText(
+                        context,
+                        error.message ?: "Failed to load lists",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    return@addSnapshotListener
+                }
+                listsLoaded = true
+                val docs = snapshot?.documents ?: emptyList()
+                lists = docs.map { doc ->
+                    ListDoc(id = doc.id, name = doc.getString("name") ?: "List")
+                }
+            }
+
+        val itemsQuery = db.collection("listItems")
+            .whereEqualTo("familyId", familyId)
+            .let { query ->
+                if (useItemsOrderBy) {
+                    query.orderBy("updatedAt", com.google.firebase.firestore.Query.Direction.DESCENDING)
+                } else {
+                    query
+                }
+            }
+            .limit(itemLimit.toLong())
+        val itemsReg = itemsQuery.addSnapshotListener { snapshot, error ->
+                if (error != null) {
+                    itemsLoaded = true
+                    if (error.message?.contains("index", ignoreCase = true) == true && useItemsOrderBy) {
+                        useItemsOrderBy = false
+                        Toast.makeText(
+                            context,
+                            "Items index missing. Falling back to unsorted items.",
+                            Toast.LENGTH_LONG
+                        ).show()
+                        return@addSnapshotListener
+                    }
+                    Toast.makeText(
+                        context,
+                        error.message ?: "Failed to load items",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    return@addSnapshotListener
+                }
+                itemsLoaded = true
+                val docs = snapshot?.documents ?: emptyList()
+                listItems = docs.map { doc ->
+                    ListItemDoc(
+                        id = doc.id,
+                        name = doc.getString("name") ?: "Item",
+                        listId = doc.getString("listId") ?: "",
+                        status = doc.getString("status"),
+                        assignedTo = doc.getString("assignedTo"),
+                        updatedAt = doc.getTimestamp("updatedAt"),
+                        createdAt = doc.getTimestamp("createdAt")
+                    )
+                }
+            }
+
+        val expenseQuery = db.collection("expenses")
+            .whereEqualTo("familyId", familyId)
+            .let { query ->
+                if (useExpensesOrderBy) {
+                    query.orderBy("date", com.google.firebase.firestore.Query.Direction.DESCENDING)
+                } else {
+                    query
+                }
+            }
+            .limit(expenseLimit.toLong())
+        val expenseReg = expenseQuery.addSnapshotListener { snapshot, error ->
+                if (error != null) {
+                    expensesLoaded = true
+                    if (error.message?.contains("index", ignoreCase = true) == true && useExpensesOrderBy) {
+                        useExpensesOrderBy = false
+                        Toast.makeText(
+                            context,
+                            "Expenses index missing. Falling back to unsorted expenses.",
+                            Toast.LENGTH_LONG
+                        ).show()
+                        return@addSnapshotListener
+                    }
+                    Toast.makeText(
+                        context,
+                        error.message ?: "Failed to load expenses",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    return@addSnapshotListener
+                }
+                expensesLoaded = true
+                val docs = snapshot?.documents ?: emptyList()
+                expenses = docs.mapNotNull { doc ->
+                    val amount = doc.getDouble("amount") ?: return@mapNotNull null
+                    ExpenseDoc(
+                        id = doc.id,
+                        amount = amount,
+                        category = doc.getString("category"),
+                        date = doc.getTimestamp("date")
+                    )
+                }
+            }
+
+        val membersReg = db.collection("users")
+            .whereEqualTo("familyId", familyId)
+            .addSnapshotListener { snapshot, error ->
+                if (error != null) {
+                    membersLoaded = true
+                    Toast.makeText(
+                        context,
+                        error.message ?: "Failed to load members",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    return@addSnapshotListener
+                }
+                membersLoaded = true
+                val docs = snapshot?.documents ?: emptyList()
+                members = docs.map { doc ->
+                    UserDoc(id = doc.id, displayName = doc.getString("displayName"))
+                }
+            }
+
+        onDispose {
+            listsReg.remove()
+            itemsReg.remove()
+            expenseReg.remove()
+            membersReg.remove()
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -68,143 +317,876 @@ fun MainScreen(signedInLabel: String, familyName: String) {
                             overflow = TextOverflow.Ellipsis
                         )
                     }
+                },
+                actions = {
+                    IconButton(onClick = {}) {
+                        Icon(imageVector = Icons.Filled.Search, contentDescription = "Search")
+                    }
+                    IconButton(onClick = { isCreateListOpen = true }) {
+                        Icon(imageVector = Icons.Filled.Add, contentDescription = "Add")
+                    }
+                    IconButton(onClick = {}) {
+                        Icon(
+                            imageVector = Icons.Filled.Notifications,
+                            contentDescription = "Notifications"
+                        )
+                    }
+                    Box {
+                        IconButton(onClick = { isProfileMenuOpen = true }) {
+                            Icon(
+                                imageVector = Icons.Filled.AccountCircle,
+                                contentDescription = "Profile menu"
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = isProfileMenuOpen,
+                            onDismissRequest = { isProfileMenuOpen = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Profile") },
+                                onClick = {
+                                    isProfileMenuOpen = false
+                                    selectedTab = "profile"
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Family settings") },
+                                onClick = {
+                                    isProfileMenuOpen = false
+                                    selectedTab = "profile"
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Sign out") },
+                                onClick = { isProfileMenuOpen = false }
+                            )
+                        }
+                    }
                 }
             )
         },
         bottomBar = {
-            NavigationBar {
+            NavigationBar(
+                containerColor = MaterialTheme.colorScheme.surface,
+                tonalElevation = 8.dp
+            ) {
                 tabs.forEach { tab ->
+                    val selected = selectedTab == tab.key
                     NavigationBarItem(
-                        selected = selectedTab == tab.key,
+                        selected = selected,
                         onClick = { selectedTab = tab.key },
                         icon = {
-                            Box(
-                                modifier = Modifier
-                                    .size(24.dp)
-                                    .background(
-                                        color = if (selectedTab == tab.key) {
-                                            MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
-                                        } else {
-                                            MaterialTheme.colorScheme.surfaceVariant
-                                        },
-                                        shape = MaterialTheme.shapes.small
-                                    ),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = tab.shortLabel,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontWeight = FontWeight.SemiBold
-                                )
+                            val icon = when (tab.key) {
+                                "home" -> Icons.Filled.Home
+                                "lists" -> Icons.Filled.ListAlt
+                                "spending" -> Icons.Filled.Payments
+                                else -> Icons.Filled.AccountCircle
                             }
+                            Icon(
+                                imageVector = icon,
+                                contentDescription = tab.label
+                            )
                         },
                         label = {
                             Text(text = tab.label, maxLines = 1)
-                        }
+                        },
+                        alwaysShowLabel = false
                     )
                 }
             }
         }
     ) { innerPadding ->
+        val backgroundBrush = Brush.verticalGradient(
+            colors = listOf(
+                MaterialTheme.colorScheme.background,
+                MaterialTheme.colorScheme.surface
+            )
+        )
         Box(
             modifier = Modifier
                 .fillMaxSize()
+                .background(backgroundBrush)
                 .padding(innerPadding)
         ) {
-            when (selectedTab) {
-                "home" -> HomeTab(signedInLabel = signedInLabel)
-                "lists" -> ListsTab()
-                "spending" -> SpendingTab()
-                "profile" -> ProfileTab(signedInLabel = signedInLabel, familyName = familyName)
+            AnimatedContent(
+                targetState = selectedTab,
+                transitionSpec = { tabTransition() },
+                label = "TabTransition"
+            ) { tab ->
+                when (tab) {
+                    "home" -> HomeTab(
+                        signedInLabel = signedInLabel,
+                        lists = lists,
+                        listItems = listItems,
+                        expenses = expenses,
+                        members = members,
+                        listsLoaded = listsLoaded,
+                        itemsLoaded = itemsLoaded,
+                        expensesLoaded = expensesLoaded,
+                        membersLoaded = membersLoaded,
+                        userId = userId,
+                        onOpenLists = { selectedTab = "lists" },
+                        onOpenSpending = { selectedTab = "spending" },
+                        onOpenProfile = { selectedTab = "profile" },
+                        onAddList = { isCreateListOpen = true },
+                        onAddExpense = { isAddExpenseOpen = true }
+                    )
+                    "lists" -> ListsTab(
+                        lists = lists,
+                        listItems = listItems,
+                        members = members,
+                        listsLoaded = listsLoaded,
+                        itemsLoaded = itemsLoaded,
+                        hasMoreLists = lists.size >= listLimit,
+                        hasMoreItems = listItems.size >= itemLimit,
+                        selectedListId = selectedListId,
+                        onSelectList = { selectedListId = it },
+                        onBackToLists = { selectedListId = null },
+                        onAddList = { isCreateListOpen = true },
+                        onLoadMoreLists = { listLimit += 50 },
+                        onLoadMoreItems = { itemLimit += 100 },
+                        onAddItem = { listId, name ->
+                            val trimmed = name.trim()
+                            if (trimmed.isEmpty()) {
+                                Toast.makeText(context, "Enter an item name", Toast.LENGTH_SHORT).show()
+                                return@ListsTab
+                            }
+                            if (familyId.isNullOrBlank()) {
+                                Toast.makeText(context, "Family not ready yet", Toast.LENGTH_SHORT).show()
+                                return@ListsTab
+                            }
+                            val data = mapOf(
+                                "name" to trimmed,
+                                "familyId" to familyId,
+                                "listId" to listId,
+                                "status" to "todo",
+                                "assignedTo" to null,
+                                "createdAt" to FieldValue.serverTimestamp(),
+                                "updatedAt" to FieldValue.serverTimestamp(),
+                                "createdBy" to userId
+                            )
+                            db.collection("listItems").add(data)
+                                .addOnFailureListener { e ->
+                                    Toast.makeText(
+                                        context,
+                                        e.message ?: "Failed to add item",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
+                        },
+                        onUpdateItem = { itemId, name ->
+                            val trimmed = name.trim()
+                            if (trimmed.isEmpty()) {
+                                Toast.makeText(context, "Enter an item name", Toast.LENGTH_SHORT).show()
+                                return@ListsTab
+                            }
+                            db.collection("listItems").document(itemId)
+                                .update(
+                                    mapOf(
+                                        "name" to trimmed,
+                                        "updatedAt" to FieldValue.serverTimestamp()
+                                    )
+                                )
+                                .addOnFailureListener { e ->
+                                    Toast.makeText(
+                                        context,
+                                        e.message ?: "Failed to update item",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
+                        },
+                        onToggleStatus = { itemId, newStatus ->
+                            db.collection("listItems").document(itemId)
+                                .update(
+                                    mapOf(
+                                        "status" to newStatus,
+                                        "updatedAt" to FieldValue.serverTimestamp()
+                                    )
+                                )
+                                .addOnFailureListener { e ->
+                                    Toast.makeText(
+                                        context,
+                                        e.message ?: "Failed to update status",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
+                        },
+                        onAssignItem = { itemId, assigneeId ->
+                            db.collection("listItems").document(itemId)
+                                .update(
+                                    mapOf(
+                                        "assignedTo" to assigneeId,
+                                        "updatedAt" to FieldValue.serverTimestamp()
+                                    )
+                                )
+                                .addOnFailureListener { e ->
+                                    Toast.makeText(
+                                        context,
+                                        e.message ?: "Failed to assign item",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
+                        },
+                        onDeleteList = { listId ->
+                            if (familyId.isNullOrBlank()) {
+                                Toast.makeText(context, "Family not ready yet", Toast.LENGTH_SHORT).show()
+                                return@ListsTab
+                            }
+                            db.collection("listItems")
+                                .whereEqualTo("listId", listId)
+                                .get()
+                                .addOnSuccessListener { snapshot ->
+                                    snapshot.documents.forEach { doc ->
+                                        doc.reference.delete()
+                                    }
+                                    db.collection("lists").document(listId).delete()
+                                        .addOnSuccessListener {
+                                            selectedListId = null
+                                            Toast.makeText(context, "List deleted", Toast.LENGTH_SHORT).show()
+                                        }
+                                        .addOnFailureListener { e ->
+                                            Toast.makeText(
+                                                context,
+                                                e.message ?: "Failed to delete list",
+                                                Toast.LENGTH_LONG
+                                            ).show()
+                                        }
+                                }
+                                .addOnFailureListener { e ->
+                                    Toast.makeText(
+                                        context,
+                                        e.message ?: "Failed to delete list items",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
+                        },
+                        onDeleteItem = { itemId ->
+                            db.collection("listItems").document(itemId).delete()
+                                .addOnFailureListener { e ->
+                                    Toast.makeText(
+                                        context,
+                                        e.message ?: "Failed to delete item",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
+                        }
+                    )
+                    "spending" -> SpendingTab(
+                        expenses = expenses,
+                        expensesLoaded = expensesLoaded,
+                        hasMoreExpenses = expenses.size >= expenseLimit,
+                        onLoadMoreExpenses = { expenseLimit += 50 }
+                    )
+                    "profile" -> ProfileTab(signedInLabel = signedInLabel, familyName = familyName)
+                }
             }
         }
     }
+
+    if (isCreateListOpen) {
+        CreateListDialog(
+            onDismiss = { isCreateListOpen = false },
+            onSave = { name ->
+                val trimmed = name.trim()
+                if (trimmed.isEmpty()) {
+                    Toast.makeText(context, "Enter a list name", Toast.LENGTH_SHORT).show()
+                    return@CreateListDialog
+                }
+                if (familyId.isNullOrBlank()) {
+                    Toast.makeText(context, "Family not ready yet", Toast.LENGTH_SHORT).show()
+                    return@CreateListDialog
+                }
+                val data = mapOf(
+                    "name" to trimmed,
+                    "familyId" to familyId,
+                    "createdAt" to com.google.firebase.firestore.FieldValue.serverTimestamp(),
+                    "createdBy" to userId
+                )
+                db.collection("lists").add(data)
+                    .addOnSuccessListener {
+                        isCreateListOpen = false
+                        Toast.makeText(context, "List created", Toast.LENGTH_SHORT).show()
+                        selectedTab = "lists"
+                    }
+                    .addOnFailureListener { e ->
+                        Toast.makeText(
+                            context,
+                            e.message ?: "Failed to create list",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+            }
+        )
+    }
+
+    if (isAddExpenseOpen) {
+        AddExpenseDialog(
+            onDismiss = { isAddExpenseOpen = false },
+            onSave = { amount, category ->
+                val value = amount.trim().toDoubleOrNull()
+                if (value == null || value <= 0) {
+                    Toast.makeText(context, "Enter a valid amount", Toast.LENGTH_SHORT).show()
+                    return@AddExpenseDialog
+                }
+                if (familyId.isNullOrBlank()) {
+                    Toast.makeText(context, "Family not ready yet", Toast.LENGTH_SHORT).show()
+                    return@AddExpenseDialog
+                }
+                val data = mapOf(
+                    "familyId" to familyId,
+                    "amount" to value,
+                    "category" to category.trim().ifEmpty { "General" },
+                    "date" to Timestamp.now(),
+                    "createdBy" to userId
+                )
+                db.collection("expenses").add(data)
+                    .addOnSuccessListener {
+                        isAddExpenseOpen = false
+                        Toast.makeText(context, "Expense added", Toast.LENGTH_SHORT).show()
+                        selectedTab = "spending"
+                    }
+                    .addOnFailureListener { e ->
+                        Toast.makeText(
+                            context,
+                            e.message ?: "Failed to add expense",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+            }
+        )
+    }
+}
+
+private fun tabTransition(): ContentTransform {
+    return slideInHorizontally { fullWidth -> fullWidth / 6 } + fadeIn() togetherWith
+        slideOutHorizontally { fullWidth -> -fullWidth / 6 } + fadeOut()
 }
 
 @Composable
-private fun HomeTab(signedInLabel: String) {
+private fun HomeTab(
+    signedInLabel: String,
+    lists: List<ListDoc>,
+    listItems: List<ListItemDoc>,
+    expenses: List<ExpenseDoc>,
+    members: List<UserDoc>,
+    listsLoaded: Boolean,
+    itemsLoaded: Boolean,
+    expensesLoaded: Boolean,
+    membersLoaded: Boolean,
+    userId: String,
+    onOpenLists: () -> Unit,
+    onOpenSpending: () -> Unit,
+    onOpenProfile: () -> Unit,
+    onAddList: () -> Unit,
+    onAddExpense: () -> Unit
+) {
+    val scrollState = rememberScrollState()
+    val itemsByList = remember(listItems) { listItems.groupBy { it.listId } }
+    val assignedItems = remember(listItems, userId) {
+        listItems.filter { it.assignedTo == userId && it.status != "bought" }
+    }
+    val recentActivities = remember(listItems, expenses) {
+        val itemEvents = listItems.mapNotNull { item ->
+            val time = item.updatedAt ?: item.createdAt ?: return@mapNotNull null
+            val label = when (item.status) {
+                "bought" -> "Marked ${item.name} bought"
+                "in_cart" -> "Moved ${item.name} to cart"
+                else -> "Updated ${item.name}"
+            }
+            ActivityEntry(label, time)
+        }
+        val expenseEvents = expenses.mapNotNull { exp ->
+            val time = exp.date ?: return@mapNotNull null
+            val label = "Logged $${"%.2f".format(exp.amount)}"
+            ActivityEntry(label, time)
+        }
+        (itemEvents + expenseEvents)
+            .sortedByDescending { it.timestamp.seconds }
+            .take(3)
+    }
+    val weeklySpend = remember(expenses) { expenses.sumOf { it.amount } }
+    val topCategories = remember(expenses) {
+        expenses.groupBy { it.category ?: "General" }
+            .toList()
+            .sortedByDescending { it.second.sumOf { exp -> exp.amount } }
+            .take(3)
+            .map { it.first }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(scrollState)
             .padding(16.dp)
     ) {
-        Text(
-            text = "Welcome back, $signedInLabel",
-            style = MaterialTheme.typography.titleLarge,
-            fontWeight = FontWeight.SemiBold
-        )
-        Text(
-            text = "Here is what is happening today.",
-            style = MaterialTheme.typography.bodyMedium
-        )
-        Spacer(modifier = Modifier.height(16.dp))
+        HeroCard(signedInLabel = signedInLabel)
+        Spacer(modifier = Modifier.height(20.dp))
 
         SectionHeader(title = "Quick actions")
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             ActionCard(
                 title = "Add list",
                 subtitle = "Create a new list",
-                modifier = Modifier.weight(1f)
+                modifier = Modifier.weight(1f),
+                onClick = onAddList
             )
             ActionCard(
                 title = "Log spend",
                 subtitle = "Add an expense",
-                modifier = Modifier.weight(1f)
+                modifier = Modifier.weight(1f),
+                onClick = onAddExpense
             )
         }
 
         Spacer(modifier = Modifier.height(20.dp))
-        SectionHeader(title = "Family overview")
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            StatCard(title = "Open items", value = "14")
-            StatCard(title = "Bought this week", value = "32")
+        SectionHeader(title = "Today's lists")
+        when {
+            !listsLoaded -> LoadingStateCard(text = "Loading lists...")
+            lists.isEmpty() -> EmptyStateCard(text = "No lists yet. Create your first list.")
+            else -> {
+                lists.take(3).forEach { list ->
+                    val items = itemsByList[list.id].orEmpty()
+                    val assigned = items.count { it.assignedTo != null }
+                    val subtitle = "${items.size} items - $assigned assigned"
+                    HomeListRow(
+                        title = list.name,
+                        subtitle = subtitle,
+                        status = if (items.isEmpty()) "No items" else "${items.count { it.status != "bought" }} left",
+                        onClick = onOpenLists
+                    )
+                }
+            }
         }
-        Spacer(modifier = Modifier.height(12.dp))
-        StatCard(
-            title = "Spend this month",
-            value = "$248.50",
-            modifier = Modifier.fillMaxWidth()
+
+        Spacer(modifier = Modifier.height(20.dp))
+        SectionHeader(title = "Assigned to me")
+        when {
+            !itemsLoaded -> LoadingStateCard(text = "Loading assignments...")
+            assignedItems.isEmpty() -> EmptyStateCard(text = "Nothing assigned to you right now.")
+            else -> {
+                assignedItems.take(3).forEach { item ->
+                    val listName = lists.firstOrNull { it.id == item.listId }?.name ?: "List"
+                    AssignedItemRow(
+                        item = item.name,
+                        list = listName,
+                        status = item.status ?: "Todo",
+                        onClick = onOpenLists
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(20.dp))
+        SectionHeader(title = "Recent activity")
+        when {
+            !itemsLoaded && !expensesLoaded -> LoadingStateCard(text = "Loading activity...")
+            recentActivities.isEmpty() -> EmptyStateCard(text = "No recent updates yet.")
+            else -> {
+                recentActivities.forEach { activity ->
+                    ActivityRow(
+                        label = activity.label,
+                        value = formatTimestamp(activity.timestamp),
+                        onClick = onOpenSpending
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(20.dp))
+        SectionHeader(title = "Spending snapshot")
+        if (!expensesLoaded) {
+            LoadingStateCard(text = "Loading spending...")
+        } else {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                StatCard(title = "This week", value = "$${"%.2f".format(weeklySpend)}")
+                StatCard(
+                    title = "Top category",
+                    value = topCategories.firstOrNull() ?: "General"
+                )
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+            if (topCategories.isEmpty()) {
+                EmptyStateCard(text = "No spending logged yet.")
+            } else {
+                CategoryRow(categories = topCategories, onClick = onOpenSpending)
+            }
+        }
+
+        Spacer(modifier = Modifier.height(20.dp))
+        SectionHeader(title = "Family members")
+        when {
+            !membersLoaded -> LoadingStateCard(text = "Loading family...")
+            members.isEmpty() -> EmptyStateCard(text = "Invite family members to see them here.")
+            else -> {
+                members.take(3).forEach { member ->
+                    FamilyMemberRow(
+                        name = member.displayName ?: member.id,
+                        status = "Active",
+                        initials = initialsFor(member.displayName ?: member.id),
+                        onClick = onOpenProfile
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun HeroCard(signedInLabel: String) {
+    val gradient = Brush.linearGradient(
+        colors = listOf(
+            MaterialTheme.colorScheme.primary,
+            MaterialTheme.colorScheme.secondary
+        )
+    )
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primary),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Box(
+            modifier = Modifier
+                .background(gradient)
+                .padding(16.dp)
+        ) {
+            Column {
+                Text(
+                    text = "Good evening, $signedInLabel",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = Color.White
+                )
+                Text(
+                    text = "You are on top of 3 active lists today.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Color.White.copy(alpha = 0.9f)
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    MiniStat(label = "Items left", value = "8")
+                    MiniStat(label = "Due today", value = "2")
+                    MiniStat(label = "Spend", value = "$36")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MiniStat(label: String, value: String) {
+    Column {
+        Text(
+            text = value,
+            style = MaterialTheme.typography.titleMedium,
+            color = Color.White
+        )
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodySmall,
+            color = Color.White.copy(alpha = 0.8f)
         )
     }
 }
 
 @Composable
-private fun ListsTab() {
+private fun ListsTab(
+    lists: List<ListDoc>,
+    listItems: List<ListItemDoc>,
+    members: List<UserDoc>,
+    listsLoaded: Boolean,
+    itemsLoaded: Boolean,
+    hasMoreLists: Boolean,
+    hasMoreItems: Boolean,
+    selectedListId: String?,
+    onSelectList: (String) -> Unit,
+    onBackToLists: () -> Unit,
+    onAddList: () -> Unit,
+    onLoadMoreLists: () -> Unit,
+    onLoadMoreItems: () -> Unit,
+    onAddItem: (String, String) -> Unit,
+    onUpdateItem: (String, String) -> Unit,
+    onToggleStatus: (String, String) -> Unit,
+    onAssignItem: (String, String?) -> Unit,
+    onDeleteList: (String) -> Unit,
+    onDeleteItem: (String) -> Unit
+) {
+    val scrollState = rememberScrollState()
+    var isAddItemOpen by remember { mutableStateOf(false) }
+    var editingItem by remember { mutableStateOf<ListItemDoc?>(null) }
+    var assigningItem by remember { mutableStateOf<ListItemDoc?>(null) }
+    var deletingItem by remember { mutableStateOf<ListItemDoc?>(null) }
+    var deletingListId by remember { mutableStateOf<String?>(null) }
+    var isDeleteListOpen by remember { mutableStateOf(false) }
+
+    if (selectedListId == null) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(scrollState)
+                .padding(16.dp)
+        ) {
+            SectionHeader(title = "Your lists")
+            when {
+                !listsLoaded -> LoadingStateCard(text = "Loading lists...")
+                lists.isEmpty() -> EmptyStateCard(text = "No lists yet. Create your first list.")
+                else -> {
+                    lists.forEach { list ->
+                        val items = listItems.filter { it.listId == list.id }
+                        val assigned = items.count { it.assignedTo != null }
+                        val subtitle = "${items.size} items - $assigned assigned"
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(modifier = Modifier.weight(1f)) {
+                                HomeListRow(
+                                    title = list.name,
+                                    subtitle = subtitle,
+                                    status = if (items.isEmpty()) "No items" else "${items.count { it.status != "bought" }} left",
+                                    onClick = { onSelectList(list.id) }
+                                )
+                            }
+                            IconButton(onClick = { deletingListId = list.id }) {
+                                Icon(imageVector = Icons.Filled.Delete, contentDescription = "Delete list")
+                            }
+                        }
+                    }
+                }
+            }
+            if (hasMoreLists) {
+                OutlinedButton(
+                    onClick = onLoadMoreLists,
+                    modifier = Modifier.padding(top = 8.dp)
+                ) {
+                    Text(text = "Load more lists")
+                }
+            }
+            Spacer(modifier = Modifier.height(16.dp))
+            OutlinedButton(onClick = onAddList) {
+                Text(text = "Create new list")
+            }
+        }
+        deletingListId?.let { listId ->
+            val name = lists.firstOrNull { it.id == listId }?.name ?: "this list"
+            ConfirmDeleteDialog(
+                title = "Delete list",
+                message = "Delete $name and all its items?",
+                onConfirm = {
+                    onDeleteList(listId)
+                    deletingListId = null
+                },
+                onDismiss = { deletingListId = null }
+            )
+        }
+        return
+    }
+
+    val listName = lists.firstOrNull { it.id == selectedListId }?.name ?: "List"
+    val itemsForList = listItems.filter { it.listId == selectedListId }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(scrollState)
             .padding(16.dp)
     ) {
-        SectionHeader(title = "Your lists")
-        ListCard(title = "Groceries", subtitle = "8 items • 3 assigned")
-        ListCard(title = "Pharmacy", subtitle = "4 items • 1 in cart")
-        ListCard(title = "Hardware", subtitle = "2 items • 0 bought")
-        Spacer(modifier = Modifier.height(16.dp))
-        OutlinedButton(onClick = {}) {
-            Text(text = "Create new list")
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onBackToLists) {
+                    Icon(imageVector = Icons.Filled.ArrowBack, contentDescription = "Back")
+                }
+                Text(
+                    text = listName,
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                IconButton(onClick = { isDeleteListOpen = true }) {
+                    Icon(imageVector = Icons.Filled.Delete, contentDescription = "Delete list")
+                }
+                IconButton(onClick = { isAddItemOpen = true }) {
+                    Icon(imageVector = Icons.Filled.Add, contentDescription = "Add item")
+                }
+            }
         }
+
+        Spacer(modifier = Modifier.height(12.dp))
+        when {
+            !itemsLoaded -> LoadingStateCard(text = "Loading items...")
+            itemsForList.isEmpty() -> EmptyStateCard(text = "No items yet. Add the first one.")
+            else -> {
+                itemsForList.forEach { item ->
+                    ListItemRow(
+                        item = item,
+                        assigneeName = members.firstOrNull { it.id == item.assignedTo }?.displayName,
+                        onToggleStatus = {
+                            val newStatus = if (item.status == "bought") "todo" else "bought"
+                            onToggleStatus(item.id, newStatus)
+                        },
+                        onEdit = { editingItem = item },
+                        onAssign = { assigningItem = item },
+                        onDelete = { deletingItem = item }
+                    )
+                }
+                if (hasMoreItems) {
+                    OutlinedButton(
+                        onClick = onLoadMoreItems,
+                        modifier = Modifier.padding(top = 8.dp)
+                    ) {
+                        Text(text = "Load more items")
+                    }
+                }
+            }
+        }
+    }
+
+    if (isAddItemOpen) {
+        AddItemDialog(
+            onDismiss = { isAddItemOpen = false },
+            onSave = { name ->
+                onAddItem(selectedListId, name)
+                isAddItemOpen = false
+            }
+        )
+    }
+
+    editingItem?.let { item ->
+        EditItemDialog(
+            initialName = item.name,
+            onDismiss = { editingItem = null },
+            onSave = { name ->
+                onUpdateItem(item.id, name)
+                editingItem = null
+            }
+        )
+    }
+
+    assigningItem?.let { item ->
+        AssignItemDialog(
+            members = members,
+            onDismiss = { assigningItem = null },
+            onAssign = { assigneeId ->
+                onAssignItem(item.id, assigneeId)
+                assigningItem = null
+            }
+        )
+    }
+
+    deletingItem?.let { item ->
+        ConfirmDeleteDialog(
+            title = "Delete item",
+            message = "Delete ${item.name}?",
+            onConfirm = {
+                onDeleteItem(item.id)
+                deletingItem = null
+            },
+            onDismiss = { deletingItem = null }
+        )
+    }
+
+    if (isDeleteListOpen) {
+        ConfirmDeleteDialog(
+            title = "Delete list",
+            message = "Delete $listName and all its items?",
+            onConfirm = {
+                onDeleteList(selectedListId)
+                isDeleteListOpen = false
+            },
+            onDismiss = { isDeleteListOpen = false }
+        )
+    }
+
+    deletingListId?.let { listId ->
+        val name = lists.firstOrNull { it.id == listId }?.name ?: "this list"
+        ConfirmDeleteDialog(
+            title = "Delete list",
+            message = "Delete $name and all its items?",
+            onConfirm = {
+                onDeleteList(listId)
+                deletingListId = null
+            },
+            onDismiss = { deletingListId = null }
+        )
     }
 }
 
 @Composable
-private fun SpendingTab() {
+private fun SpendingTab(
+    expenses: List<ExpenseDoc>,
+    expensesLoaded: Boolean,
+    hasMoreExpenses: Boolean,
+    onLoadMoreExpenses: () -> Unit
+) {
+    val scrollState = rememberScrollState()
+    val totalSpend = remember(expenses) { expenses.sumOf { it.amount } }
+    val categories = remember(expenses) {
+        expenses.groupBy { it.category ?: "General" }
+            .toList()
+            .sortedByDescending { it.second.sumOf { exp -> exp.amount } }
+            .map { it.first }
+    }
+    val recentExpenses = remember(expenses) {
+        expenses.sortedByDescending { it.date?.seconds ?: 0L }.take(5)
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(scrollState)
             .padding(16.dp)
     ) {
         SectionHeader(title = "Spending")
-        StatCard(title = "This month", value = "$248.50", modifier = Modifier.fillMaxWidth())
+        if (!expensesLoaded) {
+            LoadingStateCard(text = "Loading expenses...")
+            return
+        }
+        StatCard(title = "This month", value = "$${"%.2f".format(totalSpend)}", modifier = Modifier.fillMaxWidth())
         Spacer(modifier = Modifier.height(12.dp))
-        StatCard(title = "Top category", value = "Groceries", modifier = Modifier.fillMaxWidth())
+        StatCard(
+            title = "Top category",
+            value = categories.firstOrNull() ?: "General",
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(modifier = Modifier.height(20.dp))
+        SectionHeader(title = "Spending pulse")
+        if (expenses.isEmpty()) {
+            EmptyStateCard(text = "No expenses yet.")
+        } else {
+            ChartPlaceholder()
+        }
+        Spacer(modifier = Modifier.height(16.dp))
+        SectionHeader(title = "Categories")
+        if (categories.isEmpty()) {
+            EmptyStateCard(text = "No categories yet.")
+        } else {
+            CategoryRow(categories = categories, onClick = {})
+        }
         Spacer(modifier = Modifier.height(20.dp))
         SectionHeader(title = "Recent activity")
-        ActivityRow(label = "Groceries", value = "$62.10")
-        ActivityRow(label = "Pharmacy", value = "$18.25")
-        ActivityRow(label = "Hardware", value = "$34.90")
+        if (recentExpenses.isEmpty()) {
+            EmptyStateCard(text = "No recent expenses.")
+        } else {
+            recentExpenses.forEach { exp ->
+                val label = exp.category ?: "General"
+                val value = "$${"%.2f".format(exp.amount)}"
+                ActivityRow(label = label, value = value)
+            }
+            if (hasMoreExpenses) {
+                OutlinedButton(
+                    onClick = onLoadMoreExpenses,
+                    modifier = Modifier.padding(top = 8.dp)
+                ) {
+                    Text(text = "Load more expenses")
+                }
+            }
+        }
     }
 }
 
@@ -237,17 +1219,28 @@ private fun SectionHeader(title: String) {
 }
 
 @Composable
-private fun ActionCard(title: String, subtitle: String, modifier: Modifier = Modifier) {
+private fun ActionCard(
+    title: String,
+    subtitle: String,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit = {}
+) {
     Card(
-        modifier = modifier.height(90.dp),
+        modifier = modifier
+            .height(90.dp)
+            .clickable { onClick() },
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
+            containerColor = MaterialTheme.colorScheme.primaryContainer
         )
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
             Text(text = title, fontWeight = FontWeight.SemiBold)
             Spacer(modifier = Modifier.height(4.dp))
-            Text(text = subtitle, style = MaterialTheme.typography.bodySmall)
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
+            )
         }
     }
 }
@@ -261,7 +1254,11 @@ private fun StatCard(title: String, value: String, modifier: Modifier = Modifier
         )
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
-            Text(text = title, style = MaterialTheme.typography.bodySmall)
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
             Spacer(modifier = Modifier.height(4.dp))
             Text(text = value, style = MaterialTheme.typography.titleLarge)
         }
@@ -269,7 +1266,12 @@ private fun StatCard(title: String, value: String, modifier: Modifier = Modifier
 }
 
 @Composable
-private fun ListCard(title: String, subtitle: String) {
+private fun ListCard(
+    title: String,
+    subtitle: String,
+    progressLabel: String,
+    assignees: List<String>
+) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -281,20 +1283,560 @@ private fun ListCard(title: String, subtitle: String) {
         Column(modifier = Modifier.padding(12.dp)) {
             Text(text = title, fontWeight = FontWeight.SemiBold)
             Spacer(modifier = Modifier.height(4.dp))
-            Text(text = subtitle, style = MaterialTheme.typography.bodySmall)
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Chip(text = progressLabel)
+                AvatarRow(assignees = assignees)
+            }
         }
     }
 }
 
 @Composable
-private fun ActivityRow(label: String, value: String) {
+private fun ListItemRow(
+    item: ListItemDoc,
+    assigneeName: String?,
+    onToggleStatus: () -> Unit,
+    onEdit: () -> Unit,
+    onAssign: () -> Unit,
+    onDelete: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(text = item.name, fontWeight = FontWeight.SemiBold)
+                val assigneeLabel = assigneeName ?: "Unassigned"
+                Text(
+                    text = assigneeLabel,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                IconButton(onClick = onToggleStatus) {
+                    val icon = if (item.status == "bought") {
+                        Icons.Filled.CheckCircle
+                    } else {
+                        Icons.Filled.RadioButtonUnchecked
+                    }
+                    Icon(imageVector = icon, contentDescription = "Toggle status")
+                }
+                IconButton(onClick = onEdit) {
+                    Icon(imageVector = Icons.Filled.Edit, contentDescription = "Edit item")
+                }
+                IconButton(onClick = onAssign) {
+                    Icon(imageVector = Icons.Filled.PersonAdd, contentDescription = "Assign item")
+                }
+                IconButton(onClick = onDelete) {
+                    Icon(imageVector = Icons.Filled.Delete, contentDescription = "Delete item")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ActivityRow(label: String, value: String, onClick: () -> Unit = {}) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 8.dp),
+            .padding(vertical = 8.dp)
+            .clickable { onClick() },
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
         Text(text = label)
         Text(text = value, fontWeight = FontWeight.SemiBold)
     }
+}
+
+@Composable
+private fun HomeListRow(
+    title: String,
+    subtitle: String,
+    status: String,
+    onClick: () -> Unit = {}
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 10.dp)
+            .clickable { onClick() },
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(text = title, fontWeight = FontWeight.SemiBold)
+                Text(
+                    text = status,
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+private fun AssignedItemRow(item: String, list: String, status: String, onClick: () -> Unit = {}) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp)
+            .clickable { onClick() },
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column {
+            Text(text = item, fontWeight = FontWeight.SemiBold)
+            Text(
+                text = list,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Chip(text = status)
+    }
+}
+
+@Composable
+private fun FamilyMemberRow(
+    name: String,
+    status: String,
+    initials: String,
+    onClick: () -> Unit = {}
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp)
+            .clickable { onClick() },
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Surface(
+                shape = MaterialTheme.shapes.small,
+                color = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary
+            ) {
+                Box(
+                    modifier = Modifier.size(32.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = initials,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.width(10.dp))
+            Column {
+                Text(text = name, fontWeight = FontWeight.SemiBold)
+                Text(
+                    text = status,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        Text(
+            text = "●",
+            color = if (status == "Online") {
+                MaterialTheme.colorScheme.secondary
+            } else {
+                MaterialTheme.colorScheme.tertiary
+            },
+            fontSize = 18.sp
+        )
+    }
+}
+
+@Composable
+private fun Chip(text: String) {
+    Surface(
+        color = MaterialTheme.colorScheme.tertiary,
+        contentColor = MaterialTheme.colorScheme.onTertiary,
+        shape = MaterialTheme.shapes.small
+    ) {
+        Text(
+            text = text,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+            style = MaterialTheme.typography.labelLarge
+        )
+    }
+}
+
+@Composable
+private fun AvatarRow(assignees: List<String>) {
+    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        assignees.take(3).forEach { initials ->
+            Surface(
+                shape = MaterialTheme.shapes.small,
+                color = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary
+            ) {
+                Box(
+                    modifier = Modifier.size(28.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = initials,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChartPlaceholder() {
+    val gradient = Brush.horizontalGradient(
+        colors = listOf(
+            MaterialTheme.colorScheme.primary.copy(alpha = 0.8f),
+            MaterialTheme.colorScheme.secondary.copy(alpha = 0.8f)
+        )
+    )
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(140.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(12.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.Bottom
+            ) {
+                listOf(0.35f, 0.6f, 0.45f, 0.8f, 0.5f, 0.7f).forEach { height ->
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height((height * 100).dp)
+                            .background(gradient, MaterialTheme.shapes.small)
+                    )
+                }
+            }
+            Text(
+                text = "Weekly trend",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.align(Alignment.TopStart)
+            )
+        }
+    }
+}
+
+@Composable
+private fun CategoryRow() {
+    CategoryRow(
+        categories = listOf("Groceries", "Pharmacy", "Hardware"),
+        onClick = {}
+    )
+}
+
+@Composable
+private fun CategoryRow(categories: List<String>, onClick: () -> Unit) {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        categories.take(3).forEachIndexed { index, label ->
+            val color = when (index) {
+                0 -> MaterialTheme.colorScheme.primary
+                1 -> MaterialTheme.colorScheme.secondary
+                else -> MaterialTheme.colorScheme.tertiary
+            }
+            CategoryPill(label = label, color = color, onClick = onClick)
+        }
+    }
+}
+
+@Composable
+private fun CategoryPill(label: String, color: Color, onClick: () -> Unit = {}) {
+    Surface(
+        color = color.copy(alpha = 0.15f),
+        contentColor = color,
+        shape = MaterialTheme.shapes.medium,
+        modifier = Modifier.clickable { onClick() }
+    ) {
+        Text(
+            text = label,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+            style = MaterialTheme.typography.labelLarge.copy(fontSize = 11.sp)
+        )
+    }
+}
+
+@Composable
+private fun EmptyStateCard(text: String) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Text(
+            text = text,
+            modifier = Modifier.padding(12.dp),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+@Composable
+private fun LoadingStateCard(text: String) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Text(
+            text = text,
+            modifier = Modifier.padding(12.dp),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+@Composable
+private fun ConfirmDeleteDialog(
+    title: String,
+    message: String,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = { Text(message) },
+        confirmButton = {
+            OutlinedButton(onClick = onConfirm) {
+                Text("Delete")
+            }
+        },
+        dismissButton = {
+            OutlinedButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+private fun formatTimestamp(timestamp: Timestamp): String {
+    val date = Date(timestamp.seconds * 1000)
+    val formatter = SimpleDateFormat("MMM d", Locale.getDefault())
+    return formatter.format(date)
+}
+
+private fun initialsFor(name: String): String {
+    val parts = name.trim().split(" ").filter { it.isNotBlank() }
+    val initials = parts.take(2).mapNotNull { it.firstOrNull()?.uppercaseChar() }
+    return if (initials.isEmpty()) "-" else initials.joinToString("")
+}
+
+@Composable
+private fun CreateListDialog(onDismiss: () -> Unit, onSave: (String) -> Unit) {
+    var name by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Create list") },
+        text = {
+            TextField(
+                value = name,
+                onValueChange = { name = it },
+                label = { Text("List name") },
+                singleLine = true
+            )
+        },
+        confirmButton = {
+            OutlinedButton(onClick = { onSave(name) }) {
+                Text("Create")
+            }
+        },
+        dismissButton = {
+            OutlinedButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+@Composable
+private fun AddExpenseDialog(onDismiss: () -> Unit, onSave: (String, String) -> Unit) {
+    var amount by remember { mutableStateOf("") }
+    var category by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Add expense") },
+        text = {
+            Column {
+                TextField(
+                    value = amount,
+                    onValueChange = { amount = it },
+                    label = { Text("Amount") },
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                TextField(
+                    value = category,
+                    onValueChange = { category = it },
+                    label = { Text("Category") },
+                    singleLine = true
+                )
+            }
+        },
+        confirmButton = {
+            OutlinedButton(onClick = { onSave(amount, category) }) {
+                Text("Add")
+            }
+        },
+        dismissButton = {
+            OutlinedButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+@Composable
+private fun AddItemDialog(onDismiss: () -> Unit, onSave: (String) -> Unit) {
+    var name by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Add item") },
+        text = {
+            TextField(
+                value = name,
+                onValueChange = { name = it },
+                label = { Text("Item name") },
+                singleLine = true
+            )
+        },
+        confirmButton = {
+            OutlinedButton(onClick = { onSave(name) }) {
+                Text("Add")
+            }
+        },
+        dismissButton = {
+            OutlinedButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+@Composable
+private fun EditItemDialog(initialName: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
+    var name by remember { mutableStateOf(initialName) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Edit item") },
+        text = {
+            TextField(
+                value = name,
+                onValueChange = { name = it },
+                label = { Text("Item name") },
+                singleLine = true
+            )
+        },
+        confirmButton = {
+            OutlinedButton(onClick = { onSave(name) }) {
+                Text("Save")
+            }
+        },
+        dismissButton = {
+            OutlinedButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+@Composable
+private fun AssignItemDialog(
+    members: List<UserDoc>,
+    onDismiss: () -> Unit,
+    onAssign: (String?) -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Assign to") },
+        text = {
+            Column {
+                if (members.isEmpty()) {
+                    Text("No family members found.")
+                } else {
+                    members.forEach { member ->
+                        OutlinedButton(
+                            onClick = { onAssign(member.id) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp)
+                        ) {
+                            Text(member.displayName ?: member.id)
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = { onAssign(null) },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Unassign")
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            OutlinedButton(onClick = onDismiss) {
+                Text("Close")
+            }
+        }
+    )
 }

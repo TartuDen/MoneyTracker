@@ -124,7 +124,9 @@ class MainActivity : ComponentActivity() {
                         } else {
                             MainScreen(
                                 signedInLabel = signedInLabel,
-                                familyName = familyName ?: "Family"
+                                familyName = familyName ?: "Family",
+                                familyId = familyId,
+                                userId = userId
                             )
                         }
                     } else {

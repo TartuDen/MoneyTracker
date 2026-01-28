@@ -1,16 +1,16 @@
 # Firestore Queries (MVP)
 
 ## Lists home
-- lists where familyId == currentUser.familyId
+- lists where familyId == currentUser.familyId order by createdAt desc limit 50
 
 ## List detail
-- items where listId == selectedListId order by updatedAt desc
+- listItems where familyId == currentUser.familyId order by updatedAt desc limit 100 (filter listId in app for now)
 
 ## Suggestions
 - suggestions where familyId == currentUser.familyId order by count desc limit 10
 
 ## Expenses (monthly)
-- expenses where familyId == currentUser.familyId and date between start/end
+- expenses where familyId == currentUser.familyId order by date desc limit 50 (filter by date range in app)
 
 ## Categories
 - categories where familyId == currentUser.familyId

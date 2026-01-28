@@ -35,7 +35,7 @@ service cloud.firestore {
                               && isFamilyMember(request.resource.data.familyId));
     }
 
-    match /items/{itemId} {
+    match /listItems/{itemId} {
       allow read, write: if isFamilyMember(resource.data.familyId)
                           || (request.resource.data.familyId != null
                               && isFamilyMember(request.resource.data.familyId));
