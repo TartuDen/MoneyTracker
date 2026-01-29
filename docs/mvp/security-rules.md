@@ -1,5 +1,7 @@
 # Firestore Security Rules (MVP)
 
+Use `firestore.rules` as the source of truth.
+
 ```
 rules_version = '2';
 service cloud.firestore {
@@ -22,65 +24,77 @@ service cloud.firestore {
     }
 
     match /users/{uid} {
-      allow read, write: if isSignedIn() && request.auth.uid == uid;
+      allow read: if isSignedIn() && request.auth.uid == uid;
+      allow create: if isSignedIn()
+        && request.auth.uid == uid
+        && (request.resource.data.familyId == null);
+      allow update: if isSignedIn()
+        && request.auth.uid == uid
+        && request.resource.data.familyId == resource.data.familyId;
+      allow delete: if false;
     }
 
     match /families/{familyId} {
-      allow read, write: if isFamilyMember(familyId);
+      allow read: if isFamilyMember(familyId);
+      allow write: if false;
     }
 
     match /lists/{listId} {
-      allow read, write: if isFamilyMember(resource.data.familyId)
-                          || (request.resource.data.familyId != null
-                              && isFamilyMember(request.resource.data.familyId));
+      allow read: if isFamilyMember(resource.data.familyId);
+      allow create: if isFamilyMember(request.resource.data.familyId)
+        && request.resource.data.createdBy == request.auth.uid;
+      allow update, delete: if isFamilyMember(resource.data.familyId)
+        && request.resource.data.familyId == resource.data.familyId
+        && request.resource.data.createdBy == resource.data.createdBy;
     }
 
     match /listItems/{itemId} {
-      allow read, write: if isFamilyMember(resource.data.familyId)
-                          || (request.resource.data.familyId != null
-                              && isFamilyMember(request.resource.data.familyId));
+      allow read: if isFamilyMember(resource.data.familyId);
+      allow create: if isFamilyMember(request.resource.data.familyId)
+        && request.resource.data.createdBy == request.auth.uid;
+      allow update, delete: if isFamilyMember(resource.data.familyId)
+        && request.resource.data.familyId == resource.data.familyId
+        && request.resource.data.createdBy == resource.data.createdBy;
     }
 
     match /expenses/{expenseId} {
-      allow read, write: if isFamilyMember(resource.data.familyId)
-                          || (request.resource.data.familyId != null
-                              && isFamilyMember(request.resource.data.familyId));
+      allow read: if isFamilyMember(resource.data.familyId);
+      allow create: if isFamilyMember(request.resource.data.familyId)
+        && request.resource.data.createdBy == request.auth.uid;
+      allow update, delete: if isFamilyMember(resource.data.familyId)
+        && request.resource.data.familyId == resource.data.familyId
+        && request.resource.data.createdBy == resource.data.createdBy;
     }
 
     match /categories/{categoryId} {
-      allow read, write: if isFamilyMember(resource.data.familyId)
-                          || (request.resource.data.familyId != null
-                              && isFamilyMember(request.resource.data.familyId));
+      allow read: if isFamilyMember(resource.data.familyId);
+      allow create: if isFamilyMember(request.resource.data.familyId)
+        && request.resource.data.createdBy == request.auth.uid;
+      allow update, delete: if isFamilyMember(resource.data.familyId)
+        && request.resource.data.familyId == resource.data.familyId
+        && request.resource.data.createdBy == resource.data.createdBy;
     }
 
     match /suggestions/{suggestionId} {
-      allow read, write: if isFamilyMember(resource.data.familyId)
-                          || (request.resource.data.familyId != null
-                              && isFamilyMember(request.resource.data.familyId));
+      allow read: if isFamilyMember(resource.data.familyId);
+      allow create: if isFamilyMember(request.resource.data.familyId)
+        && request.resource.data.createdBy == request.auth.uid;
+      allow update, delete: if isFamilyMember(resource.data.familyId)
+        && request.resource.data.familyId == resource.data.familyId
+        && request.resource.data.createdBy == resource.data.createdBy;
     }
 
     match /budgets/{budgetId} {
-      allow read, write: if isFamilyMember(resource.data.familyId)
-                          || (request.resource.data.familyId != null
-                              && isFamilyMember(request.resource.data.familyId));
+      allow read: if isFamilyMember(resource.data.familyId);
+      allow create: if isFamilyMember(request.resource.data.familyId)
+        && request.resource.data.createdBy == request.auth.uid;
+      allow update, delete: if isFamilyMember(resource.data.familyId)
+        && request.resource.data.familyId == resource.data.familyId
+        && request.resource.data.createdBy == resource.data.createdBy;
     }
 
     match /invites/{code} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn()
-        && isFamilyMember(request.resource.data.familyId)
-        && request.resource.data.expiresAt > request.time;
-      allow update: if isSignedIn()
-        && (
-          isFamilyMember(resource.data.familyId)
-          || (
-            resource.data.usedBy == null
-            && request.resource.data.usedBy == request.auth.uid
-            && request.resource.data.familyId == resource.data.familyId
-            && request.resource.data.expiresAt == resource.data.expiresAt
-          )
-        );
-      allow delete: if false;
+      allow read, write, delete: if false;
     }
   }
 }

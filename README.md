@@ -12,6 +12,7 @@ Android-only prototype for a shared family shopping + spending app.
 ## Current project status
 - Android app scaffold with Jetpack Compose.
 - Firebase Auth + Firestore dependencies added.
+- Firebase Cloud Functions (Node) for create/join/invite/disband.
 - Login screen with Google sign-in (ready once web client ID is set).
 - Create/Join family flow wired to Firestore with invite codes.
 - Basic home screen after family creation/join.

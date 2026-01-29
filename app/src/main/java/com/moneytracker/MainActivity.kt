@@ -27,7 +27,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.auth.api.signin.GoogleSignInOptions
-import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.GoogleAuthProvider
@@ -35,9 +34,9 @@ import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.FirebaseFirestoreSettings
 import com.google.firebase.firestore.SetOptions
+import com.google.firebase.functions.FirebaseFunctions
 import com.moneytracker.ui.MainScreen
 import com.moneytracker.ui.theme.MoneyTrackerTheme
-import kotlin.random.Random
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -48,6 +47,7 @@ class MainActivity : ComponentActivity() {
             .build()
         setContent {
             val auth = FirebaseAuth.getInstance()
+            val functions = FirebaseFunctions.getInstance()
             var isSignedIn by remember { mutableStateOf(auth.currentUser != null) }
             var signedInLabel by remember {
                 mutableStateOf(auth.currentUser?.displayName ?: auth.currentUser?.email ?: "User")
@@ -91,7 +91,7 @@ class MainActivity : ComponentActivity() {
                     return@LaunchedEffect
                 }
                 val db = FirebaseFirestore.getInstance()
-                updateUserProfile(db, firebaseUser, familyId)
+                updateUserProfile(db, firebaseUser)
             }
 
             LaunchedEffect(isSignedIn, userId) {
@@ -252,19 +252,10 @@ private fun FamilyScreen(
     onFamilyReady: (String, String) -> Unit,
     onError: (String) -> Unit
 ) {
-    val db = FirebaseFirestore.getInstance()
+    val functions = FirebaseFunctions.getInstance()
     var familyNameInput by remember { mutableStateOf("") }
     var inviteCodeInput by remember { mutableStateOf("") }
     val context = LocalContext.current
-
-    fun generateInviteCode(): String {
-        val chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-        return buildString(8) {
-            repeat(8) {
-                append(chars[Random.nextInt(chars.length)])
-            }
-        }
-    }
 
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -284,43 +275,26 @@ private fun FamilyScreen(
                         onError("Enter a family name")
                         return@Button
                     }
-                    val familyDoc = db.collection("families").document()
-                    val newFamilyId = familyDoc.id
-                    val inviteCode = generateInviteCode()
-                    val expiresAt = Timestamp.now().let { ts ->
-                        Timestamp(ts.seconds + 1800, ts.nanoseconds)
-                    }
-
-                    val familyData = mapOf(
-                        "name" to name,
-                        "memberIds" to listOf(userId),
-                        "createdAt" to FieldValue.serverTimestamp(),
-                        "createdBy" to userId
-                    )
-                    val inviteData = mapOf(
-                        "familyId" to newFamilyId,
-                        "createdBy" to userId,
-                        "expiresAt" to expiresAt,
-                        "usedBy" to null,
-                        "usedAt" to null
-                    )
-
-                    familyDoc.set(familyData)
-                        .addOnSuccessListener {
-                            db.collection("invites").document(inviteCode)
-                                .set(inviteData)
-                                .addOnSuccessListener {
-                                    updateUserFamily(db, userId, newFamilyId, onError)
-                                    onFamilyReady(newFamilyId, name)
-                                    Toast.makeText(
-                                        context,
-                                        "Family created. Code: $inviteCode",
-                                        Toast.LENGTH_LONG
-                                    ).show()
-                                }
-                                .addOnFailureListener { e ->
-                                    onError(e.message ?: "Failed to create invite")
-                                }
+                    functions.getHttpsCallable("createFamily")
+                        .call(mapOf("name" to name))
+                        .addOnSuccessListener { result ->
+                            val data = result.data as? Map<*, *> ?: emptyMap<Any, Any>()
+                            val familyId = data["familyId"] as? String ?: ""
+                            val inviteCode = data["inviteCode"] as? String
+                            if (familyId.isBlank()) {
+                                onError("Failed to create family")
+                                return@addOnSuccessListener
+                            }
+                            onFamilyReady(familyId, name)
+                            if (!inviteCode.isNullOrBlank()) {
+                                Toast.makeText(
+                                    context,
+                                    "Family created. Code: $inviteCode",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            } else {
+                                Toast.makeText(context, "Family created", Toast.LENGTH_SHORT).show()
+                            }
                         }
                         .addOnFailureListener { e ->
                             onError(e.message ?: "Failed to create family")
@@ -345,56 +319,17 @@ private fun FamilyScreen(
                         onError("Enter 8-character code")
                         return@Button
                     }
-                    val inviteRef = db.collection("invites").document(code)
-                    val familyRef = db.collection("families")
-                    val userRef = db.collection("users").document(userId)
-                    db.runTransaction { transaction ->
-                        val inviteSnapshot = transaction.get(inviteRef)
-                        if (!inviteSnapshot.exists()) {
-                            throw IllegalStateException("Invite code not found")
-                        }
-                        val foundFamilyId = inviteSnapshot.getString("familyId")
-                        val expiresAt = inviteSnapshot.getTimestamp("expiresAt")
-                        val usedBy = inviteSnapshot.getString("usedBy")
-                        if (foundFamilyId.isNullOrEmpty()) {
-                            throw IllegalStateException("Invalid invite code")
-                        }
-                        if (expiresAt != null && expiresAt.seconds < Timestamp.now().seconds) {
-                            throw IllegalStateException("Invite code expired")
-                        }
-                        if (!usedBy.isNullOrBlank()) {
-                            throw IllegalStateException("Invite code already used")
-                        }
-
-                        val familyDoc = familyRef.document(foundFamilyId)
-                        val familySnapshot = transaction.get(familyDoc)
-                        val familyName = familySnapshot.getString("name") ?: "Family"
-
-                        transaction.update(
-                            inviteRef,
-                            mapOf(
-                                "usedBy" to userId,
-                                "usedAt" to FieldValue.serverTimestamp()
-                            )
-                        )
-                        transaction.update(
-                            familyDoc,
-                            mapOf("memberIds" to FieldValue.arrayUnion(userId))
-                        )
-                        transaction.set(
-                            userRef,
-                            mapOf(
-                                "familyId" to foundFamilyId,
-                                "updatedAt" to FieldValue.serverTimestamp()
-                            ),
-                            SetOptions.merge()
-                        )
-                        familyName to foundFamilyId
-                    }
+                    functions.getHttpsCallable("joinFamily")
+                        .call(mapOf("code" to code))
                         .addOnSuccessListener { result ->
-                            val name = result.first
-                            val foundFamilyId = result.second
-                            onFamilyReady(foundFamilyId, name)
+                            val data = result.data as? Map<*, *> ?: emptyMap<Any, Any>()
+                            val familyId = data["familyId"] as? String ?: ""
+                            val familyName = data["familyName"] as? String ?: "Family"
+                            if (familyId.isBlank()) {
+                                onError("Failed to join family")
+                                return@addOnSuccessListener
+                            }
+                            onFamilyReady(familyId, familyName)
                         }
                         .addOnFailureListener { e ->
                             onError(e.message ?: "Failed to join family")
@@ -451,27 +386,9 @@ private fun clearFamilySelection(context: Context, userId: String) {
         .apply()
 }
 
-private fun updateUserFamily(
-    db: FirebaseFirestore,
-    userId: String,
-    familyId: String,
-    onError: (String) -> Unit
-) {
-    val data = mapOf(
-        "familyId" to familyId,
-        "updatedAt" to FieldValue.serverTimestamp()
-    )
-    db.collection("users").document(userId)
-        .set(data, SetOptions.merge())
-        .addOnFailureListener { e ->
-            onError(e.message ?: "Failed to save user profile")
-        }
-}
-
 private fun updateUserProfile(
     db: FirebaseFirestore,
-    user: FirebaseUser,
-    familyId: String?
+    user: FirebaseUser
 ) {
     val userRef = db.collection("users").document(user.uid)
     userRef.get()
@@ -488,9 +405,6 @@ private fun updateUserProfile(
             }
             user.email?.let { data["email"] = it }
             user.photoUrl?.toString()?.let { data["photoUrl"] = it }
-            if (!familyId.isNullOrBlank()) {
-                data["familyId"] = familyId
-            }
             if (!snapshot.exists()) {
                 data["createdAt"] = FieldValue.serverTimestamp()
             }

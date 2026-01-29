@@ -74,11 +74,11 @@ import com.google.firebase.Timestamp
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.SetOptions
+import com.google.firebase.functions.FirebaseFunctions
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.launch
-import kotlin.random.Random
 
 private data class AppTab(
     val key: String,
@@ -1586,6 +1586,7 @@ private fun ProfileTab(
 ) {
     val context = LocalContext.current
     val db = remember { FirebaseFirestore.getInstance() }
+    val functions = remember { FirebaseFunctions.getInstance() }
     val clipboard = LocalClipboardManager.current
     var displayName by remember(currentDisplayName) {
         mutableStateOf(currentDisplayName ?: signedInLabel)
@@ -1647,22 +1648,19 @@ private fun ProfileTab(
                     Toast.makeText(context, "Family not ready yet", Toast.LENGTH_SHORT).show()
                     return@OutlinedButton
                 }
-                val code = generateInviteCode()
-                val expiresAt = Timestamp.now().let { ts ->
-                    Timestamp(ts.seconds + 1800, ts.nanoseconds)
-                }
-                val data = mapOf(
-                    "familyId" to familyId,
-                    "createdBy" to userId,
-                    "expiresAt" to expiresAt,
-                    "createdAt" to FieldValue.serverTimestamp()
-                )
-                db.collection("invites").document(code)
-                    .set(data)
-                    .addOnSuccessListener {
-                        inviteCode = code
-                        inviteExpiresAt = expiresAt
-                        Toast.makeText(context, "Invite code generated", Toast.LENGTH_SHORT).show()
+                functions.getHttpsCallable("createInvite")
+                    .call(mapOf("familyId" to familyId))
+                    .addOnSuccessListener { result ->
+                        val data = result.data as? Map<*, *> ?: emptyMap<Any, Any>()
+                        val code = data["inviteCode"] as? String
+                        val expiresMs = data["expiresAt"] as? Number
+                        if (!code.isNullOrBlank()) {
+                            inviteCode = code
+                            inviteExpiresAt = expiresMs?.toLong()?.let { Timestamp(it / 1000, 0) }
+                            Toast.makeText(context, "Invite code generated", Toast.LENGTH_SHORT).show()
+                        } else {
+                            Toast.makeText(context, "Invite created", Toast.LENGTH_SHORT).show()
+                        }
                     }
                     .addOnFailureListener { e ->
                         Toast.makeText(
@@ -1726,17 +1724,18 @@ private fun ProfileTab(
                                     Toast.makeText(context, "Family not ready yet", Toast.LENGTH_SHORT).show()
                                     return@OutlinedButton
                                 }
-                                removeMemberFromFamily(
-                                    db = db,
-                                    familyId = familyId,
-                                    memberId = member.id,
-                                    onSuccess = {
+                                functions.getHttpsCallable("removeMember")
+                                    .call(mapOf("familyId" to familyId, "memberId" to member.id))
+                                    .addOnSuccessListener {
                                         Toast.makeText(context, "Member removed", Toast.LENGTH_SHORT).show()
-                                    },
-                                    onError = { message ->
-                                        Toast.makeText(context, message, Toast.LENGTH_LONG).show()
                                     }
-                                )
+                                    .addOnFailureListener { e ->
+                                        Toast.makeText(
+                                            context,
+                                            e.message ?: "Failed to remove member",
+                                            Toast.LENGTH_LONG
+                                        ).show()
+                                    }
                             }
                         ) {
                             Text(text = "Remove")
@@ -1753,18 +1752,19 @@ private fun ProfileTab(
                         Toast.makeText(context, "Family not ready yet", Toast.LENGTH_SHORT).show()
                         return@OutlinedButton
                     }
-                    leaveFamily(
-                        db = db,
-                        familyId = familyId,
-                        userId = userId,
-                        onSuccess = {
+                    functions.getHttpsCallable("leaveFamily")
+                        .call(mapOf("familyId" to familyId))
+                        .addOnSuccessListener {
                             onFamilyCleared()
                             Toast.makeText(context, "You left the family", Toast.LENGTH_SHORT).show()
-                        },
-                        onError = { message ->
-                            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
                         }
-                    )
+                        .addOnFailureListener { e ->
+                            Toast.makeText(
+                                context,
+                                e.message ?: "Failed to leave family",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
                 }
             ) {
                 Text(text = "Leave family")
@@ -1826,20 +1826,21 @@ private fun ProfileTab(
                             Toast.makeText(context, "Family not ready yet", Toast.LENGTH_SHORT).show()
                             return@OutlinedButton
                         }
-                        disbandFamily(
-                            db = db,
-                            familyId = familyId,
-                            userId = userId,
-                            onSuccess = {
+                        functions.getHttpsCallable("disbandFamily")
+                            .call(mapOf("familyId" to familyId))
+                            .addOnSuccessListener {
                                 onFamilyCleared()
                                 Toast.makeText(context, "Family disbanded", Toast.LENGTH_SHORT).show()
                                 isDisbandOpen = false
                                 disbandPhrase = ""
-                            },
-                            onError = { message ->
-                                Toast.makeText(context, message, Toast.LENGTH_LONG).show()
                             }
-                        )
+                            .addOnFailureListener { e ->
+                                Toast.makeText(
+                                    context,
+                                    e.message ?: "Failed to disband family",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
                     }
                 ) {
                     Text("Disband")
@@ -2441,157 +2442,6 @@ private fun budgetDocId(familyId: String, category: String, period: String): Str
     return "${familyId}_${period}_$safe"
 }
 
-private fun generateInviteCode(): String {
-    val chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-    return buildString(8) {
-        repeat(8) {
-            append(chars[Random.nextInt(chars.length)])
-        }
-    }
-}
-
-private fun removeMemberFromFamily(
-    db: FirebaseFirestore,
-    familyId: String,
-    memberId: String,
-    onSuccess: () -> Unit,
-    onError: (String) -> Unit
-) {
-    val familyRef = db.collection("families").document(familyId)
-    val userRef = db.collection("users").document(memberId)
-    db.runTransaction { transaction ->
-        transaction.update(
-            familyRef,
-            mapOf("memberIds" to FieldValue.arrayRemove(memberId))
-        )
-        transaction.set(
-            userRef,
-            mapOf(
-                "familyId" to null,
-                "updatedAt" to FieldValue.serverTimestamp()
-            ),
-            SetOptions.merge()
-        )
-    }
-        .addOnSuccessListener { onSuccess() }
-        .addOnFailureListener { e ->
-            onError(e.message ?: "Failed to remove member")
-        }
-}
-
-private fun leaveFamily(
-    db: FirebaseFirestore,
-    familyId: String,
-    userId: String,
-    onSuccess: () -> Unit,
-    onError: (String) -> Unit
-) {
-    removeMemberFromFamily(
-        db = db,
-        familyId = familyId,
-        memberId = userId,
-        onSuccess = onSuccess,
-        onError = onError
-    )
-}
-
-private fun disbandFamily(
-    db: FirebaseFirestore,
-    familyId: String,
-    userId: String,
-    onSuccess: () -> Unit,
-    onError: (String) -> Unit
-) {
-    val familyRef = db.collection("families").document(familyId)
-    val userRef = db.collection("users").document(userId)
-    deleteFamilyData(
-        db = db,
-        familyId = familyId,
-        onSuccess = {
-            familyRef.delete()
-                .addOnSuccessListener {
-                    userRef.set(
-                        mapOf(
-                            "familyId" to null,
-                            "updatedAt" to FieldValue.serverTimestamp()
-                        ),
-                        SetOptions.merge()
-                    )
-                        .addOnSuccessListener { onSuccess() }
-                        .addOnFailureListener { e ->
-                            onError(e.message ?: "Failed to clear user")
-                        }
-                }
-                .addOnFailureListener { e ->
-                    onError(e.message ?: "Failed to delete family")
-                }
-        },
-        onError = onError
-    )
-}
-
-private fun deleteFamilyData(
-    db: FirebaseFirestore,
-    familyId: String,
-    onSuccess: () -> Unit,
-    onError: (String) -> Unit
-) {
-    val collections = listOf(
-        "lists",
-        "listItems",
-        "expenses",
-        "categories",
-        "suggestions",
-        "budgets",
-        "invites"
-    )
-    deleteByFamilyCollections(
-        db = db,
-        familyId = familyId,
-        collections = collections,
-        onSuccess = onSuccess,
-        onError = onError
-    )
-}
-
-private fun deleteByFamilyCollections(
-    db: FirebaseFirestore,
-    familyId: String,
-    collections: List<String>,
-    onSuccess: () -> Unit,
-    onError: (String) -> Unit
-) {
-    if (collections.isEmpty()) {
-        onSuccess()
-        return
-    }
-    val current = collections.first()
-    db.collection(current)
-        .whereEqualTo("familyId", familyId)
-        .get()
-        .addOnSuccessListener { snapshot ->
-            val batch = db.batch()
-            snapshot.documents.forEach { doc ->
-                batch.delete(doc.reference)
-            }
-            batch.commit()
-                .addOnSuccessListener {
-                    deleteByFamilyCollections(
-                        db = db,
-                        familyId = familyId,
-                        collections = collections.drop(1),
-                        onSuccess = onSuccess,
-                        onError = onError
-                    )
-                }
-                .addOnFailureListener { e ->
-                    onError(e.message ?: "Failed to delete $current")
-                }
-        }
-        .addOnFailureListener { e ->
-            onError(e.message ?: "Failed to read $current")
-        }
-}
 
 private fun formatFilterLabel(value: String): String {
     return value

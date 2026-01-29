@@ -15,6 +15,8 @@
 - Analytics ranges (weekly/monthly totals + category breakdown)
 - Offline persistence enabled
 - Firestore rules + indexes files added
+- Cloud Functions enforce family create/join/invite/remove/disband
+- Firestore rules hardened against familyId escalation
 - User profile fields ensured on sign-in
 - Prototype email login removed
 

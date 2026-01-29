@@ -11,3 +11,5 @@
 Notes:
 - Security rules are in `firestore.rules`
 - Suggested indexes are in `firestore.indexes.json`
+- Cloud Functions live in `functions/` (deploy them before using create/join/invite/disband flows)
+- Consider enabling App Check for Firestore + Functions
