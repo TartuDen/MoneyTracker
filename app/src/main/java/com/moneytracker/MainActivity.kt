@@ -29,6 +29,7 @@ import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.auth.api.signin.GoogleSignInOptions
 import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.GoogleAuthProvider
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
@@ -51,6 +52,34 @@ class MainActivity : ComponentActivity() {
             var familyName by remember { mutableStateOf<String?>(null) }
             var isResolvingFamily by remember { mutableStateOf(false) }
             val context = LocalContext.current
+
+            fun performSignOut() {
+                val currentUserId = userId
+                FirebaseAuth.getInstance().signOut()
+                val gso = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN).build()
+                GoogleSignIn.getClient(context, gso).signOut()
+                clearPrototypeUser(context)
+                if (currentUserId.isNotBlank()) {
+                    clearFamilySelection(context, currentUserId)
+                }
+                signedInLabel = "User"
+                userId = ""
+                familyId = null
+                familyName = null
+                isSignedIn = false
+            }
+
+            LaunchedEffect(isSignedIn, userId) {
+                val firebaseUser = auth.currentUser
+                if (!isSignedIn || firebaseUser == null) {
+                    return@LaunchedEffect
+                }
+                if (firebaseUser.uid != userId) {
+                    return@LaunchedEffect
+                }
+                val db = FirebaseFirestore.getInstance()
+                updateUserProfile(db, firebaseUser)
+            }
 
             LaunchedEffect(Unit) {
                 if (auth.currentUser == null) {
@@ -126,7 +155,8 @@ class MainActivity : ComponentActivity() {
                                 signedInLabel = signedInLabel,
                                 familyName = familyName ?: "Family",
                                 familyId = familyId,
-                                userId = userId
+                                userId = userId,
+                                onSignOut = { performSignOut() }
                             )
                         }
                     } else {
@@ -431,6 +461,23 @@ private fun loadPrototypeUser(context: Context): Pair<String, String>? {
     return label to userId
 }
 
+private fun clearPrototypeUser(context: Context) {
+    val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    prefs.edit()
+        .remove(PREFS_KEY_AUTH_PROVIDER)
+        .remove(PREFS_KEY_USER_ID)
+        .remove(PREFS_KEY_USER_LABEL)
+        .apply()
+}
+
+private fun clearFamilySelection(context: Context, userId: String) {
+    val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    prefs.edit()
+        .remove(familyIdKey(userId))
+        .remove(familyNameKey(userId))
+        .apply()
+}
+
 private fun updateUserFamily(
     db: FirebaseFirestore,
     userId: String,
@@ -445,5 +492,22 @@ private fun updateUserFamily(
         .set(data, SetOptions.merge())
         .addOnFailureListener { e ->
             onError(e.message ?: "Failed to save user profile")
+        }
+}
+
+private fun updateUserProfile(db: FirebaseFirestore, user: FirebaseUser) {
+    val userRef = db.collection("users").document(user.uid)
+    userRef.get()
+        .addOnSuccessListener { snapshot ->
+            val data = mutableMapOf<String, Any?>(
+                "displayName" to user.displayName,
+                "email" to user.email,
+                "photoUrl" to user.photoUrl?.toString(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            if (!snapshot.exists()) {
+                data["createdAt"] = FieldValue.serverTimestamp()
+            }
+            userRef.set(data, SetOptions.merge())
         }
 }

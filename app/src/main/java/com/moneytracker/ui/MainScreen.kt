@@ -13,6 +13,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Card
@@ -37,22 +40,18 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.ContentTransform
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideOutHorizontally
-import androidx.compose.animation.togetherWith
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Add
@@ -67,8 +66,8 @@ import androidx.compose.material.icons.filled.Payments
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material3.AlertDialog
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.material3.AlertDialog
 import android.widget.Toast
 import com.google.firebase.Timestamp
 import com.google.firebase.firestore.FieldValue
@@ -77,6 +76,7 @@ import com.google.firebase.firestore.SetOptions
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.launch
 
 private data class AppTab(
     val key: String,
@@ -104,12 +104,13 @@ private data class UserDoc(val id: String, val displayName: String?)
 private data class ActivityEntry(val label: String, val timestamp: Timestamp)
 
 @Composable
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 fun MainScreen(
     signedInLabel: String,
     familyName: String,
     familyId: String?,
-    userId: String
+    userId: String,
+    onSignOut: () -> Unit
 ) {
     val tabs = remember {
         listOf(
@@ -127,8 +128,11 @@ fun MainScreen(
     var isCreateListOpen by remember { mutableStateOf(false) }
     var isAddExpenseOpen by remember { mutableStateOf(false) }
     var isProfileMenuOpen by remember { mutableStateOf(false) }
+    var requestSearchFocus by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val db = remember { FirebaseFirestore.getInstance() }
+    val pagerState = rememberPagerState(initialPage = 0, pageCount = { tabs.size })
+    val scope = rememberCoroutineScope()
 
     var lists by remember { mutableStateOf<List<ListDoc>>(emptyList()) }
     var listItems by remember { mutableStateOf<List<ListItemDoc>>(emptyList()) }
@@ -144,6 +148,10 @@ fun MainScreen(
     LaunchedEffect(familyId) {
         useItemsOrderBy = true
         useExpensesOrderBy = true
+    }
+
+    LaunchedEffect(pagerState.currentPage) {
+        selectedTab = tabs[pagerState.currentPage].key
     }
 
     DisposableEffect(
@@ -320,7 +328,16 @@ fun MainScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = {}) {
+                    IconButton(onClick = {
+                        requestSearchFocus = true
+                        selectedTab = "lists"
+                        if (selectedListId == null && lists.isNotEmpty()) {
+                            selectedListId = lists.first().id
+                        }
+                        scope.launch {
+                            pagerState.animateScrollToPage(tabs.indexOfFirst { it.key == "lists" })
+                        }
+                    }) {
                         Icon(imageVector = Icons.Filled.Search, contentDescription = "Search")
                     }
                     IconButton(onClick = { isCreateListOpen = true }) {
@@ -348,6 +365,9 @@ fun MainScreen(
                                 onClick = {
                                     isProfileMenuOpen = false
                                     selectedTab = "profile"
+                                    scope.launch {
+                                        pagerState.animateScrollToPage(tabs.indexOfFirst { it.key == "profile" })
+                                    }
                                 }
                             )
                             DropdownMenuItem(
@@ -355,11 +375,17 @@ fun MainScreen(
                                 onClick = {
                                     isProfileMenuOpen = false
                                     selectedTab = "profile"
+                                    scope.launch {
+                                        pagerState.animateScrollToPage(tabs.indexOfFirst { it.key == "profile" })
+                                    }
                                 }
                             )
                             DropdownMenuItem(
                                 text = { Text("Sign out") },
-                                onClick = { isProfileMenuOpen = false }
+                                onClick = {
+                                    isProfileMenuOpen = false
+                                    onSignOut()
+                                }
                             )
                         }
                     }
@@ -375,7 +401,12 @@ fun MainScreen(
                     val selected = selectedTab == tab.key
                     NavigationBarItem(
                         selected = selected,
-                        onClick = { selectedTab = tab.key },
+                        onClick = {
+                            selectedTab = tab.key
+                            scope.launch {
+                                pagerState.animateScrollToPage(tabs.indexOfFirst { it.key == tab.key })
+                            }
+                        },
                         icon = {
                             val icon = when (tab.key) {
                                 "home" -> Icons.Filled.Home
@@ -409,12 +440,8 @@ fun MainScreen(
                 .background(backgroundBrush)
                 .padding(innerPadding)
         ) {
-            AnimatedContent(
-                targetState = selectedTab,
-                transitionSpec = { tabTransition() },
-                label = "TabTransition"
-            ) { tab ->
-                when (tab) {
+            HorizontalPager(state = pagerState) { page ->
+                when (tabs[page].key) {
                     "home" -> HomeTab(
                         signedInLabel = signedInLabel,
                         lists = lists,
@@ -426,9 +453,18 @@ fun MainScreen(
                         expensesLoaded = expensesLoaded,
                         membersLoaded = membersLoaded,
                         userId = userId,
-                        onOpenLists = { selectedTab = "lists" },
-                        onOpenSpending = { selectedTab = "spending" },
-                        onOpenProfile = { selectedTab = "profile" },
+                        onOpenLists = {
+                            selectedTab = "lists"
+                            scope.launch { pagerState.animateScrollToPage(1) }
+                        },
+                        onOpenSpending = {
+                            selectedTab = "spending"
+                            scope.launch { pagerState.animateScrollToPage(2) }
+                        },
+                        onOpenProfile = {
+                            selectedTab = "profile"
+                            scope.launch { pagerState.animateScrollToPage(3) }
+                        },
                         onAddList = { isCreateListOpen = true },
                         onAddExpense = { isAddExpenseOpen = true }
                     )
@@ -441,6 +477,9 @@ fun MainScreen(
                         hasMoreLists = lists.size >= listLimit,
                         hasMoreItems = listItems.size >= itemLimit,
                         selectedListId = selectedListId,
+                        userId = userId,
+                        requestSearchFocus = requestSearchFocus,
+                        onSearchFocusHandled = { requestSearchFocus = false },
                         onSelectList = { selectedListId = it },
                         onBackToLists = { selectedListId = null },
                         onAddList = { isCreateListOpen = true },
@@ -584,7 +623,8 @@ fun MainScreen(
                             signedInLabel = signedInLabel,
                             familyName = familyName,
                             userId = userId,
-                            currentDisplayName = currentName
+                            currentDisplayName = currentName,
+                            onSignOut = onSignOut
                         )
                     }
                 }
@@ -664,11 +704,6 @@ fun MainScreen(
             }
         )
     }
-}
-
-private fun tabTransition(): ContentTransform {
-    return slideInHorizontally { fullWidth -> fullWidth / 6 } + fadeIn() togetherWith
-        slideOutHorizontally { fullWidth -> -fullWidth / 6 } + fadeOut()
 }
 
 @Composable
@@ -908,6 +943,9 @@ private fun ListsTab(
     hasMoreLists: Boolean,
     hasMoreItems: Boolean,
     selectedListId: String?,
+    userId: String,
+    requestSearchFocus: Boolean,
+    onSearchFocusHandled: () -> Unit,
     onSelectList: (String) -> Unit,
     onBackToLists: () -> Unit,
     onAddList: () -> Unit,
@@ -927,6 +965,10 @@ private fun ListsTab(
     var deletingItem by remember { mutableStateOf<ListItemDoc?>(null) }
     var deletingListId by remember { mutableStateOf<String?>(null) }
     var isDeleteListOpen by remember { mutableStateOf(false) }
+    var searchQuery by remember { mutableStateOf("") }
+    var statusFilter by remember { mutableStateOf("all") }
+    var isFilterMenuOpen by remember { mutableStateOf(false) }
+    val searchFocusRequester = remember { FocusRequester() }
 
     if (selectedListId == null) {
         Column(
@@ -994,6 +1036,28 @@ private fun ListsTab(
 
     val listName = lists.firstOrNull { it.id == selectedListId }?.name ?: "List"
     val itemsForList = listItems.filter { it.listId == selectedListId }
+    val normalizedQuery = searchQuery.trim().lowercase()
+    val filteredItems = itemsForList.filter { item ->
+        val matchesQuery = normalizedQuery.isBlank() ||
+            item.name.lowercase().contains(normalizedQuery)
+        val matchesStatus = when (statusFilter) {
+            "todo" -> item.status == "todo" || item.status == null
+            "in_cart" -> item.status == "in_cart"
+            "bought" -> item.status == "bought"
+            "assigned" -> item.assignedTo == userId
+            else -> true
+        }
+        matchesQuery && matchesStatus
+    }
+    val pendingItems = filteredItems.filter { it.status != "bought" }
+    val boughtItems = filteredItems.filter { it.status == "bought" }
+
+    LaunchedEffect(requestSearchFocus, selectedListId) {
+        if (requestSearchFocus && selectedListId != null) {
+            searchFocusRequester.requestFocus()
+            onSearchFocusHandled()
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -1027,23 +1091,74 @@ private fun ListsTab(
         }
 
         Spacer(modifier = Modifier.height(12.dp))
+        TextField(
+            value = searchQuery,
+            onValueChange = { searchQuery = it },
+            label = { Text("Search items") },
+            singleLine = true,
+            modifier = Modifier
+                .fillMaxWidth()
+                .focusRequester(searchFocusRequester)
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Box {
+            OutlinedButton(onClick = { isFilterMenuOpen = true }) {
+                Text(text = "Filter: ${formatFilterLabel(statusFilter)}")
+            }
+            DropdownMenu(
+                expanded = isFilterMenuOpen,
+                onDismissRequest = { isFilterMenuOpen = false }
+            ) {
+                listOf("all", "todo", "in_cart", "bought", "assigned").forEach { option ->
+                    DropdownMenuItem(
+                        text = { Text(formatFilterLabel(option)) },
+                        onClick = {
+                            statusFilter = option
+                            isFilterMenuOpen = false
+                        }
+                    )
+                }
+            }
+        }
         when {
             !itemsLoaded -> LoadingStateCard(text = "Loading items...")
             itemsForList.isEmpty() -> EmptyStateCard(text = "No items yet. Add the first one.")
+            filteredItems.isEmpty() -> EmptyStateCard(text = "No items match this filter.")
             else -> {
-                itemsForList.forEach { item ->
-                    val assignee = members.firstOrNull { it.id == item.assignedTo }
-                    ListItemRow(
-                        item = item,
-                        assigneeName = assignee?.displayName ?: assignee?.id,
-                        onToggleStatus = {
-                            val newStatus = if (item.status == "bought") "todo" else "bought"
-                            onToggleStatus(item.id, newStatus)
-                        },
-                        onEdit = { editingItem = item },
-                        onAssign = { assigningItem = item },
-                        onDelete = { deletingItem = item }
-                    )
+                if (pendingItems.isNotEmpty()) {
+                    SectionHeader(title = "To buy (${pendingItems.size})")
+                    pendingItems.forEach { item ->
+                        val assignee = members.firstOrNull { it.id == item.assignedTo }
+                        ListItemRow(
+                            item = item,
+                            assigneeName = assignee?.displayName ?: assignee?.id,
+                            onToggleStatus = {
+                                val newStatus = if (item.status == "bought") "todo" else "bought"
+                                onToggleStatus(item.id, newStatus)
+                            },
+                            onEdit = { editingItem = item },
+                            onAssign = { assigningItem = item },
+                            onDelete = { deletingItem = item }
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+                if (boughtItems.isNotEmpty()) {
+                    SectionHeader(title = "Bought (${boughtItems.size})")
+                    boughtItems.forEach { item ->
+                        val assignee = members.firstOrNull { it.id == item.assignedTo }
+                        ListItemRow(
+                            item = item,
+                            assigneeName = assignee?.displayName ?: assignee?.id,
+                            onToggleStatus = {
+                                val newStatus = if (item.status == "bought") "todo" else "bought"
+                                onToggleStatus(item.id, newStatus)
+                            },
+                            onEdit = { editingItem = item },
+                            onAssign = { assigningItem = item },
+                            onDelete = { deletingItem = item }
+                        )
+                    }
                 }
                 if (hasMoreItems) {
                     OutlinedButton(
@@ -1205,7 +1320,8 @@ private fun ProfileTab(
     signedInLabel: String,
     familyName: String,
     userId: String,
-    currentDisplayName: String?
+    currentDisplayName: String?,
+    onSignOut: () -> Unit
 ) {
     val context = LocalContext.current
     val db = remember { FirebaseFirestore.getInstance() }
@@ -1257,7 +1373,7 @@ private fun ProfileTab(
             Text(text = "Save")
         }
         Spacer(modifier = Modifier.height(20.dp))
-        OutlinedButton(onClick = {}) {
+        OutlinedButton(onClick = onSignOut) {
             Text(text = "Sign out")
         }
     }
@@ -1727,6 +1843,15 @@ private fun formatTimestamp(timestamp: Timestamp): String {
     val date = Date(timestamp.seconds * 1000)
     val formatter = SimpleDateFormat("MMM d", Locale.getDefault())
     return formatter.format(date)
+}
+
+private fun formatFilterLabel(value: String): String {
+    return value
+        .split("_")
+        .filter { it.isNotBlank() }
+        .joinToString(" ") { part ->
+            part.replaceFirstChar { it.uppercase() }
+        }
 }
 
 private fun initialsFor(name: String): String {
