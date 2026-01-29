@@ -73,6 +73,7 @@ import android.widget.Toast
 import com.google.firebase.Timestamp
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.SetOptions
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -306,7 +307,7 @@ fun MainScreen(
                 title = {
                     Column {
                         Text(
-                            text = "MoneyTracker",
+                            text = "ShoppE",
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
@@ -577,7 +578,15 @@ fun MainScreen(
                         hasMoreExpenses = expenses.size >= expenseLimit,
                         onLoadMoreExpenses = { expenseLimit += 50 }
                     )
-                    "profile" -> ProfileTab(signedInLabel = signedInLabel, familyName = familyName)
+                    "profile" -> {
+                        val currentName = members.firstOrNull { it.id == userId }?.displayName
+                        ProfileTab(
+                            signedInLabel = signedInLabel,
+                            familyName = familyName,
+                            userId = userId,
+                            currentDisplayName = currentName
+                        )
+                    }
                 }
             }
         }
@@ -1023,9 +1032,10 @@ private fun ListsTab(
             itemsForList.isEmpty() -> EmptyStateCard(text = "No items yet. Add the first one.")
             else -> {
                 itemsForList.forEach { item ->
+                    val assignee = members.firstOrNull { it.id == item.assignedTo }
                     ListItemRow(
                         item = item,
-                        assigneeName = members.firstOrNull { it.id == item.assignedTo }?.displayName,
+                        assigneeName = assignee?.displayName ?: assignee?.id,
                         onToggleStatus = {
                             val newStatus = if (item.status == "bought") "todo" else "bought"
                             onToggleStatus(item.id, newStatus)
@@ -1191,7 +1201,18 @@ private fun SpendingTab(
 }
 
 @Composable
-private fun ProfileTab(signedInLabel: String, familyName: String) {
+private fun ProfileTab(
+    signedInLabel: String,
+    familyName: String,
+    userId: String,
+    currentDisplayName: String?
+) {
+    val context = LocalContext.current
+    val db = remember { FirebaseFirestore.getInstance() }
+    var displayName by remember(currentDisplayName) {
+        mutableStateOf(currentDisplayName ?: signedInLabel)
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1201,6 +1222,40 @@ private fun ProfileTab(signedInLabel: String, familyName: String) {
         StatCard(title = "Signed in as", value = signedInLabel, modifier = Modifier.fillMaxWidth())
         Spacer(modifier = Modifier.height(12.dp))
         StatCard(title = "Family", value = familyName, modifier = Modifier.fillMaxWidth())
+        Spacer(modifier = Modifier.height(16.dp))
+        Text(text = "Display name", style = MaterialTheme.typography.bodyMedium)
+        TextField(
+            value = displayName,
+            onValueChange = { displayName = it },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp),
+            singleLine = true
+        )
+        OutlinedButton(
+            onClick = {
+                val trimmed = displayName.trim()
+                if (trimmed.isEmpty()) {
+                    Toast.makeText(context, "Enter a display name", Toast.LENGTH_SHORT).show()
+                    return@OutlinedButton
+                }
+                db.collection("users").document(userId)
+                    .set(mapOf("displayName" to trimmed), SetOptions.merge())
+                    .addOnSuccessListener {
+                        Toast.makeText(context, "Display name updated", Toast.LENGTH_SHORT).show()
+                    }
+                    .addOnFailureListener { e ->
+                        Toast.makeText(
+                            context,
+                            e.message ?: "Failed to update display name",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+            },
+            modifier = Modifier.padding(top = 12.dp)
+        ) {
+            Text(text = "Save")
+        }
         Spacer(modifier = Modifier.height(20.dp))
         OutlinedButton(onClick = {}) {
             Text(text = "Sign out")

@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">MoneyTracker</string>
+    <string name="app_name">ShoppE</string>
     <!-- TODO: Replace with your Firebase Web Client ID if not auto-generated -->
     <string name="default_web_client_id">REPLACE_WITH_WEB_CLIENT_ID</string>
 </resources>

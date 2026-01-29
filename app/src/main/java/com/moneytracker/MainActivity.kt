@@ -193,7 +193,7 @@ private fun LoginScreen(
 
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(text = "MoneyTracker MVP")
+            Text(text = "ShoppE MVP")
             Text(
                 text = if (userName != null) "Signed in as $userName" else "Not signed in",
                 modifier = Modifier.padding(top = 8.dp, bottom = 16.dp)
