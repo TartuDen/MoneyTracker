@@ -69,6 +69,15 @@ class MainActivity : ComponentActivity() {
                 isSignedIn = false
             }
 
+            fun clearFamilyState() {
+                val currentUserId = userId
+                if (currentUserId.isNotBlank()) {
+                    clearFamilySelection(context, currentUserId)
+                }
+                familyId = null
+                familyName = null
+            }
+
             LaunchedEffect(isSignedIn, userId) {
                 val firebaseUser = auth.currentUser
                 if (!isSignedIn || firebaseUser == null) {
@@ -156,7 +165,8 @@ class MainActivity : ComponentActivity() {
                                 familyName = familyName ?: "Family",
                                 familyId = familyId,
                                 userId = userId,
-                                onSignOut = { performSignOut() }
+                                onSignOut = { performSignOut() },
+                                onFamilyCleared = { clearFamilyState() }
                             )
                         }
                     } else {
@@ -280,8 +290,12 @@ private fun FamilyScreen(
     val context = LocalContext.current
 
     fun generateInviteCode(): String {
-        val code = Random.nextInt(0, 1_000_000)
-        return code.toString().padStart(6, '0')
+        val chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+        return buildString(8) {
+            repeat(8) {
+                append(chars[Random.nextInt(chars.length)])
+            }
+        }
     }
 
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -312,12 +326,15 @@ private fun FamilyScreen(
                     val familyData = mapOf(
                         "name" to name,
                         "memberIds" to listOf(userId),
-                        "createdAt" to FieldValue.serverTimestamp()
+                        "createdAt" to FieldValue.serverTimestamp(),
+                        "createdBy" to userId
                     )
                     val inviteData = mapOf(
                         "familyId" to newFamilyId,
                         "createdBy" to userId,
-                        "expiresAt" to expiresAt
+                        "expiresAt" to expiresAt,
+                        "usedBy" to null,
+                        "usedAt" to null
                     )
 
                     familyDoc.set(familyData)
@@ -356,42 +373,63 @@ private fun FamilyScreen(
                 modifier = Modifier.padding(top = 8.dp),
                 onClick = {
                     val code = inviteCodeInput.trim()
-                    if (code.length != 6) {
-                        onError("Enter 6-digit code")
+                    if (code.length != 8) {
+                        onError("Enter 8-character code")
                         return@Button
                     }
-                    db.collection("invites").document(code).get()
-                        .addOnSuccessListener { snapshot ->
-                            if (!snapshot.exists()) {
-                                onError("Invite code not found")
-                                return@addOnSuccessListener
-                            }
-                            val foundFamilyId = snapshot.getString("familyId")
-                            val expiresAt = snapshot.getTimestamp("expiresAt")
-                            if (foundFamilyId.isNullOrEmpty()) {
-                                onError("Invalid invite code")
-                                return@addOnSuccessListener
-                            }
-                            if (expiresAt != null && expiresAt.seconds < Timestamp.now().seconds) {
-                                onError("Invite code expired")
-                                return@addOnSuccessListener
-                            }
-                            db.collection("families").document(foundFamilyId)
-                                .update("memberIds", FieldValue.arrayUnion(userId))
-                                .addOnSuccessListener {
-                                    db.collection("families").document(foundFamilyId).get()
-                                        .addOnSuccessListener { fam ->
-                                            val name = fam.getString("name") ?: "Family"
-                                            updateUserFamily(db, userId, foundFamilyId, onError)
-                                            onFamilyReady(foundFamilyId, name)
-                                        }
-                                }
-                                .addOnFailureListener { e ->
-                                    onError(e.message ?: "Failed to join family")
-                                }
+                    val inviteRef = db.collection("invites").document(code)
+                    val familyRef = db.collection("families")
+                    val userRef = db.collection("users").document(userId)
+                    db.runTransaction { transaction ->
+                        val inviteSnapshot = transaction.get(inviteRef)
+                        if (!inviteSnapshot.exists()) {
+                            throw IllegalStateException("Invite code not found")
+                        }
+                        val foundFamilyId = inviteSnapshot.getString("familyId")
+                        val expiresAt = inviteSnapshot.getTimestamp("expiresAt")
+                        val usedBy = inviteSnapshot.getString("usedBy")
+                        if (foundFamilyId.isNullOrEmpty()) {
+                            throw IllegalStateException("Invalid invite code")
+                        }
+                        if (expiresAt != null && expiresAt.seconds < Timestamp.now().seconds) {
+                            throw IllegalStateException("Invite code expired")
+                        }
+                        if (!usedBy.isNullOrBlank()) {
+                            throw IllegalStateException("Invite code already used")
+                        }
+
+                        val familyDoc = familyRef.document(foundFamilyId)
+                        val familySnapshot = transaction.get(familyDoc)
+                        val familyName = familySnapshot.getString("name") ?: "Family"
+
+                        transaction.update(
+                            inviteRef,
+                            mapOf(
+                                "usedBy" to userId,
+                                "usedAt" to FieldValue.serverTimestamp()
+                            )
+                        )
+                        transaction.update(
+                            familyDoc,
+                            mapOf("memberIds" to FieldValue.arrayUnion(userId))
+                        )
+                        transaction.set(
+                            userRef,
+                            mapOf(
+                                "familyId" to foundFamilyId,
+                                "updatedAt" to FieldValue.serverTimestamp()
+                            ),
+                            SetOptions.merge()
+                        )
+                        familyName to foundFamilyId
+                    }
+                        .addOnSuccessListener { result ->
+                            val name = result.first
+                            val foundFamilyId = result.second
+                            onFamilyReady(foundFamilyId, name)
                         }
                         .addOnFailureListener { e ->
-                            onError(e.message ?: "Failed to read invite")
+                            onError(e.message ?: "Failed to join family")
                         }
                 }
             ) {

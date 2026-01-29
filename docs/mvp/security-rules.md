@@ -60,12 +60,20 @@ service cloud.firestore {
     }
 
     match /invites/{code} {
-      allow read: if true;
+      allow read: if isSignedIn();
       allow create: if isSignedIn()
         && isFamilyMember(request.resource.data.familyId)
         && request.resource.data.expiresAt > request.time;
       allow update: if isSignedIn()
-        && isFamilyMember(resource.data.familyId);
+        && (
+          isFamilyMember(resource.data.familyId)
+          || (
+            resource.data.usedBy == null
+            && request.resource.data.usedBy == request.auth.uid
+            && request.resource.data.familyId == resource.data.familyId
+            && request.resource.data.expiresAt == resource.data.expiresAt
+          )
+        );
       allow delete: if false;
     }
   }

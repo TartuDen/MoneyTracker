@@ -13,6 +13,7 @@
 - name
 - memberIds
 - createdAt
+- createdBy
 
 ## Invite
 - code

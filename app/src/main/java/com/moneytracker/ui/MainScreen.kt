@@ -112,7 +112,8 @@ fun MainScreen(
     familyName: String,
     familyId: String?,
     userId: String,
-    onSignOut: () -> Unit
+    onSignOut: () -> Unit,
+    onFamilyCleared: () -> Unit
 ) {
     val tabs = remember {
         listOf(
@@ -146,6 +147,7 @@ fun MainScreen(
     var membersLoaded by remember { mutableStateOf(false) }
     var useItemsOrderBy by remember { mutableStateOf(true) }
     var useExpensesOrderBy by remember { mutableStateOf(true) }
+    var familyOwnerId by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(familyId) {
         useItemsOrderBy = true
@@ -174,6 +176,7 @@ fun MainScreen(
             expensesLoaded = false
             membersLoaded = false
             selectedListId = null
+            familyOwnerId = null
             return@DisposableEffect onDispose {}
         }
 
@@ -303,11 +306,20 @@ fun MainScreen(
                 }
             }
 
+        val familyReg = db.collection("families").document(familyId)
+            .addSnapshotListener { snapshot, error ->
+                if (error != null) {
+                    return@addSnapshotListener
+                }
+                familyOwnerId = snapshot?.getString("createdBy")
+            }
+
         onDispose {
             listsReg.remove()
             itemsReg.remove()
             expenseReg.remove()
             membersReg.remove()
+            familyReg.remove()
         }
     }
 
@@ -627,7 +639,10 @@ fun MainScreen(
                             familyId = familyId,
                             userId = userId,
                             currentDisplayName = currentName,
-                            onSignOut = onSignOut
+                            onSignOut = onSignOut,
+                            members = members,
+                            familyOwnerId = familyOwnerId,
+                            onFamilyCleared = onFamilyCleared
                         )
                     }
                 }
@@ -1325,7 +1340,10 @@ private fun ProfileTab(
     familyId: String?,
     userId: String,
     currentDisplayName: String?,
-    onSignOut: () -> Unit
+    onSignOut: () -> Unit,
+    members: List<UserDoc>,
+    familyOwnerId: String?,
+    onFamilyCleared: () -> Unit
 ) {
     val context = LocalContext.current
     val db = remember { FirebaseFirestore.getInstance() }
@@ -1335,6 +1353,7 @@ private fun ProfileTab(
     }
     var inviteCode by remember { mutableStateOf<String?>(null) }
     var inviteExpiresAt by remember { mutableStateOf<Timestamp?>(null) }
+    val isOwner = familyOwnerId != null && familyOwnerId == userId
 
     Column(
         modifier = Modifier
@@ -1434,6 +1453,110 @@ private fun ProfileTab(
             ) {
                 Text(text = "Copy code")
             }
+        }
+        Spacer(modifier = Modifier.height(20.dp))
+        SectionHeader(title = "Family members")
+        if (members.isEmpty()) {
+            Text(text = "No members found.")
+        } else {
+            members.forEach { member ->
+                val label = member.displayName ?: member.id
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(text = label, fontWeight = FontWeight.SemiBold)
+                        if (member.id == familyOwnerId) {
+                            Text(
+                                text = "Owner",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+                    if (isOwner && member.id != userId) {
+                        OutlinedButton(
+                            onClick = {
+                                if (familyId.isNullOrBlank()) {
+                                    Toast.makeText(context, "Family not ready yet", Toast.LENGTH_SHORT).show()
+                                    return@OutlinedButton
+                                }
+                                removeMemberFromFamily(
+                                    db = db,
+                                    familyId = familyId,
+                                    memberId = member.id,
+                                    onSuccess = {
+                                        Toast.makeText(context, "Member removed", Toast.LENGTH_SHORT).show()
+                                    },
+                                    onError = { message ->
+                                        Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                                    }
+                                )
+                            }
+                        ) {
+                            Text(text = "Remove")
+                        }
+                    }
+                }
+            }
+        }
+        Spacer(modifier = Modifier.height(16.dp))
+        if (!isOwner) {
+            OutlinedButton(
+                onClick = {
+                    if (familyId.isNullOrBlank()) {
+                        Toast.makeText(context, "Family not ready yet", Toast.LENGTH_SHORT).show()
+                        return@OutlinedButton
+                    }
+                    leaveFamily(
+                        db = db,
+                        familyId = familyId,
+                        userId = userId,
+                        onSuccess = {
+                            onFamilyCleared()
+                            Toast.makeText(context, "You left the family", Toast.LENGTH_SHORT).show()
+                        },
+                        onError = { message ->
+                            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                        }
+                    )
+                }
+            ) {
+                Text(text = "Leave family")
+            }
+        } else if (members.size == 1) {
+            OutlinedButton(
+                onClick = {
+                    if (familyId.isNullOrBlank()) {
+                        Toast.makeText(context, "Family not ready yet", Toast.LENGTH_SHORT).show()
+                        return@OutlinedButton
+                    }
+                    disbandFamily(
+                        db = db,
+                        familyId = familyId,
+                        userId = userId,
+                        onSuccess = {
+                            onFamilyCleared()
+                            Toast.makeText(context, "Family disbanded", Toast.LENGTH_SHORT).show()
+                        },
+                        onError = { message ->
+                            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                        }
+                    )
+                }
+            ) {
+                Text(text = "Disband family")
+            }
+        } else {
+            Text(
+                text = "To disband, remove all members first.",
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(top = 4.dp)
+            )
         }
         Spacer(modifier = Modifier.height(20.dp))
         OutlinedButton(onClick = onSignOut) {
@@ -1909,8 +2032,154 @@ private fun formatTimestamp(timestamp: Timestamp): String {
 }
 
 private fun generateInviteCode(): String {
-    val code = Random.nextInt(0, 1_000_000)
-    return code.toString().padStart(6, '0')
+    val chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    return buildString(8) {
+        repeat(8) {
+            append(chars[Random.nextInt(chars.length)])
+        }
+    }
+}
+
+private fun removeMemberFromFamily(
+    db: FirebaseFirestore,
+    familyId: String,
+    memberId: String,
+    onSuccess: () -> Unit,
+    onError: (String) -> Unit
+) {
+    val familyRef = db.collection("families").document(familyId)
+    val userRef = db.collection("users").document(memberId)
+    db.runTransaction { transaction ->
+        transaction.update(
+            familyRef,
+            mapOf("memberIds" to FieldValue.arrayRemove(memberId))
+        )
+        transaction.set(
+            userRef,
+            mapOf(
+                "familyId" to null,
+                "updatedAt" to FieldValue.serverTimestamp()
+            ),
+            SetOptions.merge()
+        )
+    }
+        .addOnSuccessListener { onSuccess() }
+        .addOnFailureListener { e ->
+            onError(e.message ?: "Failed to remove member")
+        }
+}
+
+private fun leaveFamily(
+    db: FirebaseFirestore,
+    familyId: String,
+    userId: String,
+    onSuccess: () -> Unit,
+    onError: (String) -> Unit
+) {
+    removeMemberFromFamily(
+        db = db,
+        familyId = familyId,
+        memberId = userId,
+        onSuccess = onSuccess,
+        onError = onError
+    )
+}
+
+private fun disbandFamily(
+    db: FirebaseFirestore,
+    familyId: String,
+    userId: String,
+    onSuccess: () -> Unit,
+    onError: (String) -> Unit
+) {
+    val familyRef = db.collection("families").document(familyId)
+    val userRef = db.collection("users").document(userId)
+    deleteFamilyData(
+        db = db,
+        familyId = familyId,
+        onSuccess = {
+            familyRef.delete()
+                .addOnSuccessListener {
+                    userRef.set(
+                        mapOf(
+                            "familyId" to null,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        ),
+                        SetOptions.merge()
+                    )
+                        .addOnSuccessListener { onSuccess() }
+                        .addOnFailureListener { e ->
+                            onError(e.message ?: "Failed to clear user")
+                        }
+                }
+                .addOnFailureListener { e ->
+                    onError(e.message ?: "Failed to delete family")
+                }
+        },
+        onError = onError
+    )
+}
+
+private fun deleteFamilyData(
+    db: FirebaseFirestore,
+    familyId: String,
+    onSuccess: () -> Unit,
+    onError: (String) -> Unit
+) {
+    val collections = listOf(
+        "lists",
+        "listItems",
+        "expenses",
+        "categories",
+        "suggestions",
+        "invites"
+    )
+    deleteByFamilyCollections(
+        db = db,
+        familyId = familyId,
+        collections = collections,
+        onSuccess = onSuccess,
+        onError = onError
+    )
+}
+
+private fun deleteByFamilyCollections(
+    db: FirebaseFirestore,
+    familyId: String,
+    collections: List<String>,
+    onSuccess: () -> Unit,
+    onError: (String) -> Unit
+) {
+    if (collections.isEmpty()) {
+        onSuccess()
+        return
+    }
+    val current = collections.first()
+    db.collection(current)
+        .whereEqualTo("familyId", familyId)
+        .get()
+        .addOnSuccessListener { snapshot ->
+            val batch = db.batch()
+            snapshot.documents.forEach { doc ->
+                batch.delete(doc.reference)
+            }
+            batch.commit()
+                .addOnSuccessListener {
+                    deleteByFamilyCollections(
+                        db = db,
+                        familyId = familyId,
+                        collections = collections.drop(1),
+                        onSuccess = onSuccess,
+                        onError = onError
+                    )
+                }
+                .addOnFailureListener { e ->
+                    onError(e.message ?: "Failed to delete $current")
+                }
+        }
+        .addOnFailureListener { e ->
+            onError(e.message ?: "Failed to read $current")
+        }
 }
 
 private fun formatFilterLabel(value: String): String {
