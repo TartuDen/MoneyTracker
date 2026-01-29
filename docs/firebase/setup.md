@@ -9,4 +9,5 @@
    - Firestore Database
 
 Notes:
-- Security rules are in `docs/mvp/security-rules.md`
+- Security rules are in `firestore.rules`
+- Suggested indexes are in `firestore.indexes.json`

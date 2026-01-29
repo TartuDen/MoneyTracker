@@ -52,6 +52,15 @@
 - date
 - createdBy
 
+## Budget
+- id
+- familyId
+- category
+- limit
+- period (weekly, monthly)
+- createdAt
+- createdBy
+
 ## Category
 - id
 - familyId

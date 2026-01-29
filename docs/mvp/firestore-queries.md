@@ -7,7 +7,7 @@
 - listItems where familyId == currentUser.familyId order by updatedAt desc limit 100 (filter listId in app for now)
 
 ## Suggestions
-- suggestions where familyId == currentUser.familyId order by count desc limit 10
+- suggestions where familyId == currentUser.familyId limit 50 (sorted by count client-side)
 
 ## Expenses (monthly)
 - expenses where familyId == currentUser.familyId order by date desc limit 50 (filter by date range in app)

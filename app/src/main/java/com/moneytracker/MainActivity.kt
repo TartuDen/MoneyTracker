@@ -33,6 +33,7 @@ import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.GoogleAuthProvider
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.FirebaseFirestoreSettings
 import com.google.firebase.firestore.SetOptions
 import com.moneytracker.ui.MainScreen
 import com.moneytracker.ui.theme.MoneyTrackerTheme
@@ -41,6 +42,10 @@ import kotlin.random.Random
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val firestore = FirebaseFirestore.getInstance()
+        firestore.firestoreSettings = FirebaseFirestoreSettings.Builder()
+            .setPersistenceEnabled(true)
+            .build()
         setContent {
             val auth = FirebaseAuth.getInstance()
             var isSignedIn by remember { mutableStateOf(auth.currentUser != null) }
@@ -58,7 +63,6 @@ class MainActivity : ComponentActivity() {
                 FirebaseAuth.getInstance().signOut()
                 val gso = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN).build()
                 GoogleSignIn.getClient(context, gso).signOut()
-                clearPrototypeUser(context)
                 if (currentUserId.isNotBlank()) {
                     clearFamilySelection(context, currentUserId)
                 }
@@ -87,18 +91,7 @@ class MainActivity : ComponentActivity() {
                     return@LaunchedEffect
                 }
                 val db = FirebaseFirestore.getInstance()
-                updateUserProfile(db, firebaseUser)
-            }
-
-            LaunchedEffect(Unit) {
-                if (auth.currentUser == null) {
-                    val savedUser = loadPrototypeUser(context)
-                    if (savedUser != null) {
-                        signedInLabel = savedUser.first
-                        userId = savedUser.second
-                        isSignedIn = true
-                    }
-                }
+                updateUserProfile(db, firebaseUser, familyId)
             }
 
             LaunchedEffect(isSignedIn, userId) {
@@ -175,9 +168,6 @@ class MainActivity : ComponentActivity() {
                                 signedInLabel = label
                                 userId = id
                                 isSignedIn = true
-                                if (id.startsWith("email:")) {
-                                    savePrototypeUser(context, id, label)
-                                }
                                 Toast.makeText(this, "Signed in", Toast.LENGTH_SHORT).show()
                             },
                             onSignInError = { message ->
@@ -198,7 +188,6 @@ private fun LoginScreen(
 ) {
     val auth = FirebaseAuth.getInstance()
     var userName by remember { mutableStateOf(auth.currentUser?.displayName) }
-    var emailInput by remember { mutableStateOf("test@prototype.local") }
     val context = LocalContext.current
 
     val launcher = androidx.activity.compose.rememberLauncherForActivityResult(
@@ -252,27 +241,6 @@ private fun LoginScreen(
                 launcher.launch(client.signInIntent)
             }) {
                 Text(text = "Continue with Google")
-            }
-            TextField(
-                value = emailInput,
-                onValueChange = { emailInput = it },
-                label = { Text("Email (prototype)") },
-                modifier = Modifier.padding(top = 16.dp),
-                singleLine = true
-            )
-            Button(
-                modifier = Modifier.padding(top = 8.dp),
-                onClick = {
-                    val trimmed = emailInput.trim()
-                    if (trimmed.isEmpty() || !trimmed.contains("@")) {
-                        onSignInError("Enter a valid email")
-                        return@Button
-                    }
-                    Toast.makeText(context, "Signed in as $trimmed", Toast.LENGTH_SHORT).show()
-                    onSignedIn(trimmed, "email:$trimmed")
-                }
-            ) {
-                Text(text = "Continue with Email (Prototype)")
             }
         }
     }
@@ -447,10 +415,6 @@ private fun LoadingScreen() {
 }
 
 private const val PREFS_NAME = "moneytracker_prefs"
-private const val PREFS_KEY_AUTH_PROVIDER = "authProvider"
-private const val PREFS_KEY_USER_ID = "userId"
-private const val PREFS_KEY_USER_LABEL = "userLabel"
-private const val AUTH_PROVIDER_PROTOTYPE = "prototype_email"
 
 private fun familyIdKey(userId: String) = "familyId:$userId"
 private fun familyNameKey(userId: String) = "familyName:$userId"
@@ -479,35 +443,6 @@ private fun saveFamilySelection(
     editor.apply()
 }
 
-private fun savePrototypeUser(context: Context, userId: String, label: String) {
-    val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-    prefs.edit()
-        .putString(PREFS_KEY_AUTH_PROVIDER, AUTH_PROVIDER_PROTOTYPE)
-        .putString(PREFS_KEY_USER_ID, userId)
-        .putString(PREFS_KEY_USER_LABEL, label)
-        .apply()
-}
-
-private fun loadPrototypeUser(context: Context): Pair<String, String>? {
-    val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-    val provider = prefs.getString(PREFS_KEY_AUTH_PROVIDER, null)
-    if (provider != AUTH_PROVIDER_PROTOTYPE) {
-        return null
-    }
-    val userId = prefs.getString(PREFS_KEY_USER_ID, null) ?: return null
-    val label = prefs.getString(PREFS_KEY_USER_LABEL, userId) ?: userId
-    return label to userId
-}
-
-private fun clearPrototypeUser(context: Context) {
-    val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-    prefs.edit()
-        .remove(PREFS_KEY_AUTH_PROVIDER)
-        .remove(PREFS_KEY_USER_ID)
-        .remove(PREFS_KEY_USER_LABEL)
-        .apply()
-}
-
 private fun clearFamilySelection(context: Context, userId: String) {
     val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     prefs.edit()
@@ -533,16 +468,29 @@ private fun updateUserFamily(
         }
 }
 
-private fun updateUserProfile(db: FirebaseFirestore, user: FirebaseUser) {
+private fun updateUserProfile(
+    db: FirebaseFirestore,
+    user: FirebaseUser,
+    familyId: String?
+) {
     val userRef = db.collection("users").document(user.uid)
     userRef.get()
         .addOnSuccessListener { snapshot ->
             val data = mutableMapOf<String, Any?>(
-                "displayName" to user.displayName,
-                "email" to user.email,
-                "photoUrl" to user.photoUrl?.toString(),
                 "updatedAt" to FieldValue.serverTimestamp()
             )
+            val existingDisplayName = snapshot.getString("displayName")
+            val resolvedDisplayName = user.displayName ?: user.email
+            if (existingDisplayName.isNullOrBlank() && !resolvedDisplayName.isNullOrBlank()) {
+                data["displayName"] = resolvedDisplayName
+            } else if (!user.displayName.isNullOrBlank()) {
+                data["displayName"] = user.displayName
+            }
+            user.email?.let { data["email"] = it }
+            user.photoUrl?.toString()?.let { data["photoUrl"] = it }
+            if (!familyId.isNullOrBlank()) {
+                data["familyId"] = familyId
+            }
             if (!snapshot.exists()) {
                 data["createdAt"] = FieldValue.serverTimestamp()
             }

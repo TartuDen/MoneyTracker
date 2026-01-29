@@ -102,6 +102,18 @@ private data class ExpenseDoc(
     val category: String?,
     val date: Timestamp?
 )
+private data class SuggestionDoc(
+    val id: String,
+    val name: String,
+    val count: Long,
+    val lastBoughtAt: Timestamp?
+)
+private data class BudgetDoc(
+    val id: String,
+    val category: String,
+    val limit: Double,
+    val period: String
+)
 private data class UserDoc(val id: String, val displayName: String?)
 private data class ActivityEntry(val label: String, val timestamp: Timestamp)
 
@@ -141,13 +153,19 @@ fun MainScreen(
     var listItems by remember { mutableStateOf<List<ListItemDoc>>(emptyList()) }
     var expenses by remember { mutableStateOf<List<ExpenseDoc>>(emptyList()) }
     var members by remember { mutableStateOf<List<UserDoc>>(emptyList()) }
+    var suggestions by remember { mutableStateOf<List<SuggestionDoc>>(emptyList()) }
+    var budgets by remember { mutableStateOf<List<BudgetDoc>>(emptyList()) }
     var listsLoaded by remember { mutableStateOf(false) }
     var itemsLoaded by remember { mutableStateOf(false) }
     var expensesLoaded by remember { mutableStateOf(false) }
     var membersLoaded by remember { mutableStateOf(false) }
+    var suggestionsLoaded by remember { mutableStateOf(false) }
+    var budgetsLoaded by remember { mutableStateOf(false) }
     var useItemsOrderBy by remember { mutableStateOf(true) }
     var useExpensesOrderBy by remember { mutableStateOf(true) }
     var familyOwnerId by remember { mutableStateOf<String?>(null) }
+    val currentDisplayName = members.firstOrNull { it.id == userId }?.displayName
+    val displayLabel = currentDisplayName ?: signedInLabel
 
     LaunchedEffect(familyId) {
         useItemsOrderBy = true
@@ -171,10 +189,14 @@ fun MainScreen(
             listItems = emptyList()
             expenses = emptyList()
             members = emptyList()
+            suggestions = emptyList()
+            budgets = emptyList()
             listsLoaded = false
             itemsLoaded = false
             expensesLoaded = false
             membersLoaded = false
+            suggestionsLoaded = false
+            budgetsLoaded = false
             selectedListId = null
             familyOwnerId = null
             return@DisposableEffect onDispose {}
@@ -306,6 +328,63 @@ fun MainScreen(
                 }
             }
 
+        val suggestionsReg = db.collection("suggestions")
+            .whereEqualTo("familyId", familyId)
+            .addSnapshotListener { snapshot, error ->
+                if (error != null) {
+                    suggestionsLoaded = true
+                    Toast.makeText(
+                        context,
+                        error.message ?: "Failed to load suggestions",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    return@addSnapshotListener
+                }
+                suggestionsLoaded = true
+                val docs = snapshot?.documents ?: emptyList()
+                suggestions = docs.mapNotNull { doc ->
+                    val name = doc.getString("itemName") ?: return@mapNotNull null
+                    val count = doc.getLong("count") ?: 0L
+                    SuggestionDoc(
+                        id = doc.id,
+                        name = name,
+                        count = count,
+                        lastBoughtAt = doc.getTimestamp("lastBoughtAt")
+                    )
+                }
+                    .sortedWith(
+                        compareByDescending<SuggestionDoc> { it.count }
+                            .thenByDescending { it.lastBoughtAt?.seconds ?: 0L }
+                    )
+            }
+
+        val budgetsReg = db.collection("budgets")
+            .whereEqualTo("familyId", familyId)
+            .addSnapshotListener { snapshot, error ->
+                if (error != null) {
+                    budgetsLoaded = true
+                    Toast.makeText(
+                        context,
+                        error.message ?: "Failed to load budgets",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    return@addSnapshotListener
+                }
+                budgetsLoaded = true
+                val docs = snapshot?.documents ?: emptyList()
+                budgets = docs.mapNotNull { doc ->
+                    val category = doc.getString("category") ?: return@mapNotNull null
+                    val limit = doc.getDouble("limit") ?: return@mapNotNull null
+                    val period = doc.getString("period") ?: "monthly"
+                    BudgetDoc(
+                        id = doc.id,
+                        category = category,
+                        limit = limit,
+                        period = period
+                    )
+                }
+            }
+
         val familyReg = db.collection("families").document(familyId)
             .addSnapshotListener { snapshot, error ->
                 if (error != null) {
@@ -319,6 +398,8 @@ fun MainScreen(
             itemsReg.remove()
             expenseReg.remove()
             membersReg.remove()
+            suggestionsReg.remove()
+            budgetsReg.remove()
             familyReg.remove()
         }
     }
@@ -457,7 +538,7 @@ fun MainScreen(
             HorizontalPager(state = pagerState) { page ->
                 when (tabs[page].key) {
                     "home" -> HomeTab(
-                        signedInLabel = signedInLabel,
+                        signedInLabel = displayLabel,
                         lists = lists,
                         listItems = listItems,
                         expenses = expenses,
@@ -486,6 +567,8 @@ fun MainScreen(
                         lists = lists,
                         listItems = listItems,
                         members = members,
+                        suggestions = suggestions,
+                        suggestionsLoaded = suggestionsLoaded,
                         listsLoaded = listsLoaded,
                         itemsLoaded = itemsLoaded,
                         hasMoreLists = lists.size >= listLimit,
@@ -549,14 +632,26 @@ fun MainScreen(
                                     ).show()
                                 }
                         },
-                        onToggleStatus = { itemId, newStatus ->
-                            db.collection("listItems").document(itemId)
-                                .update(
-                                    mapOf(
-                                        "status" to newStatus,
-                                        "updatedAt" to FieldValue.serverTimestamp()
-                                    )
-                                )
+                        onToggleStatus = { item, newStatus ->
+                            val updates = mutableMapOf<String, Any?>(
+                                "status" to newStatus,
+                                "updatedAt" to FieldValue.serverTimestamp()
+                            )
+                            if (newStatus == "bought") {
+                                updates["lastBoughtAt"] = FieldValue.serverTimestamp()
+                            }
+                            db.collection("listItems").document(item.id)
+                                .update(updates)
+                                .addOnSuccessListener {
+                                    if (newStatus == "bought" && !familyId.isNullOrBlank()) {
+                                        recordSuggestion(
+                                            db = db,
+                                            familyId = familyId,
+                                            itemName = item.name,
+                                            userId = userId
+                                        )
+                                    }
+                                }
                                 .addOnFailureListener { e ->
                                     Toast.makeText(
                                         context,
@@ -629,16 +724,63 @@ fun MainScreen(
                         expenses = expenses,
                         expensesLoaded = expensesLoaded,
                         hasMoreExpenses = expenses.size >= expenseLimit,
-                        onLoadMoreExpenses = { expenseLimit += 50 }
+                        budgets = budgets,
+                        budgetsLoaded = budgetsLoaded,
+                        onLoadMoreExpenses = { expenseLimit += 50 },
+                        onSaveBudget = { category, limit, period ->
+                            val trimmedCategory = category.trim().ifEmpty { "General" }
+                            val parsedLimit = limit.trim().toDoubleOrNull()
+                            if (parsedLimit == null || parsedLimit <= 0) {
+                                Toast.makeText(context, "Enter a valid budget amount", Toast.LENGTH_SHORT).show()
+                                return@SpendingTab
+                            }
+                            if (familyId.isNullOrBlank()) {
+                                Toast.makeText(context, "Family not ready yet", Toast.LENGTH_SHORT).show()
+                                return@SpendingTab
+                            }
+                            val budgetId = budgetDocId(familyId, trimmedCategory, period)
+                            val ref = db.collection("budgets").document(budgetId)
+                            db.runTransaction { transaction ->
+                                val snapshot = transaction.get(ref)
+                                val data = mutableMapOf<String, Any?>(
+                                    "familyId" to familyId,
+                                    "category" to trimmedCategory,
+                                    "limit" to parsedLimit,
+                                    "period" to period,
+                                    "updatedAt" to FieldValue.serverTimestamp()
+                                )
+                                if (!snapshot.exists()) {
+                                    data["createdAt"] = FieldValue.serverTimestamp()
+                                    data["createdBy"] = userId
+                                }
+                                transaction.set(ref, data, SetOptions.merge())
+                            }
+                                .addOnFailureListener { e ->
+                                    Toast.makeText(
+                                        context,
+                                        e.message ?: "Failed to save budget",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
+                        },
+                        onDeleteBudget = { budget ->
+                            db.collection("budgets").document(budget.id).delete()
+                                .addOnFailureListener { e ->
+                                    Toast.makeText(
+                                        context,
+                                        e.message ?: "Failed to delete budget",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
+                        }
                     )
                     "profile" -> {
-                        val currentName = members.firstOrNull { it.id == userId }?.displayName
                         ProfileTab(
-                            signedInLabel = signedInLabel,
+                            signedInLabel = displayLabel,
                             familyName = familyName,
                             familyId = familyId,
                             userId = userId,
-                            currentDisplayName = currentName,
+                            currentDisplayName = currentDisplayName,
                             onSignOut = onSignOut,
                             members = members,
                             familyOwnerId = familyOwnerId,
@@ -766,9 +908,10 @@ private fun HomeTab(
             .sortedByDescending { it.timestamp.seconds }
             .take(3)
     }
-    val weeklySpend = remember(expenses) { expenses.sumOf { it.amount } }
-    val topCategories = remember(expenses) {
-        expenses.groupBy { it.category ?: "General" }
+    val weeklyExpenses = remember(expenses) { filterExpensesByRange(expenses, "weekly") }
+    val weeklySpend = remember(weeklyExpenses) { weeklyExpenses.sumOf { it.amount } }
+    val topCategories = remember(weeklyExpenses) {
+        weeklyExpenses.groupBy { it.category ?: "General" }
             .toList()
             .sortedByDescending { it.second.sumOf { exp -> exp.amount } }
             .take(3)
@@ -956,6 +1099,8 @@ private fun ListsTab(
     lists: List<ListDoc>,
     listItems: List<ListItemDoc>,
     members: List<UserDoc>,
+    suggestions: List<SuggestionDoc>,
+    suggestionsLoaded: Boolean,
     listsLoaded: Boolean,
     itemsLoaded: Boolean,
     hasMoreLists: Boolean,
@@ -971,7 +1116,7 @@ private fun ListsTab(
     onLoadMoreItems: () -> Unit,
     onAddItem: (String, String) -> Unit,
     onUpdateItem: (String, String) -> Unit,
-    onToggleStatus: (String, String) -> Unit,
+    onToggleStatus: (ListItemDoc, String) -> Unit,
     onAssignItem: (String, String?) -> Unit,
     onDeleteList: (String) -> Unit,
     onDeleteItem: (String) -> Unit
@@ -1138,6 +1283,22 @@ private fun ListsTab(
                 }
             }
         }
+        Spacer(modifier = Modifier.height(12.dp))
+        SectionHeader(title = "Suggestions")
+        when {
+            !suggestionsLoaded -> LoadingStateCard(text = "Loading suggestions...")
+            suggestions.isEmpty() -> EmptyStateCard(text = "No suggestions yet. Mark items bought to build them.")
+            else -> {
+                suggestions.take(5).forEach { suggestion ->
+                    SuggestionRow(
+                        name = suggestion.name,
+                        count = suggestion.count,
+                        lastBoughtAt = suggestion.lastBoughtAt,
+                        onAdd = { onAddItem(selectedListId, suggestion.name) }
+                    )
+                }
+            }
+        }
         when {
             !itemsLoaded -> LoadingStateCard(text = "Loading items...")
             itemsForList.isEmpty() -> EmptyStateCard(text = "No items yet. Add the first one.")
@@ -1152,7 +1313,7 @@ private fun ListsTab(
                             assigneeName = assignee?.displayName ?: assignee?.id,
                             onToggleStatus = {
                                 val newStatus = if (item.status == "bought") "todo" else "bought"
-                                onToggleStatus(item.id, newStatus)
+                                onToggleStatus(item, newStatus)
                             },
                             onEdit = { editingItem = item },
                             onAssign = { assigningItem = item },
@@ -1170,7 +1331,7 @@ private fun ListsTab(
                             assigneeName = assignee?.displayName ?: assignee?.id,
                             onToggleStatus = {
                                 val newStatus = if (item.status == "bought") "todo" else "bought"
-                                onToggleStatus(item.id, newStatus)
+                                onToggleStatus(item, newStatus)
                             },
                             onEdit = { editingItem = item },
                             onAssign = { assigningItem = item },
@@ -1265,12 +1426,23 @@ private fun SpendingTab(
     expenses: List<ExpenseDoc>,
     expensesLoaded: Boolean,
     hasMoreExpenses: Boolean,
-    onLoadMoreExpenses: () -> Unit
+    budgets: List<BudgetDoc>,
+    budgetsLoaded: Boolean,
+    onLoadMoreExpenses: () -> Unit,
+    onSaveBudget: (String, String, String) -> Unit,
+    onDeleteBudget: (BudgetDoc) -> Unit
 ) {
     val scrollState = rememberScrollState()
-    val totalSpend = remember(expenses) { expenses.sumOf { it.amount } }
-    val categories = remember(expenses) {
-        expenses.groupBy { it.category ?: "General" }
+    var range by remember { mutableStateOf("monthly") }
+    var isRangeMenuOpen by remember { mutableStateOf(false) }
+    var isAddBudgetOpen by remember { mutableStateOf(false) }
+
+    val weeklyExpenses = remember(expenses) { filterExpensesByRange(expenses, "weekly") }
+    val monthlyExpenses = remember(expenses) { filterExpensesByRange(expenses, "monthly") }
+    val rangeExpenses = if (range == "weekly") weeklyExpenses else monthlyExpenses
+    val totalSpend = remember(rangeExpenses) { rangeExpenses.sumOf { it.amount } }
+    val categories = remember(rangeExpenses) {
+        rangeExpenses.groupBy { it.category ?: "General" }
             .toList()
             .sortedByDescending { it.second.sumOf { exp -> exp.amount } }
             .map { it.first }
@@ -1278,6 +1450,8 @@ private fun SpendingTab(
     val recentExpenses = remember(expenses) {
         expenses.sortedByDescending { it.date?.seconds ?: 0L }.take(5)
     }
+    val weeklyByCategory = remember(weeklyExpenses) { sumByCategory(weeklyExpenses) }
+    val monthlyByCategory = remember(monthlyExpenses) { sumByCategory(monthlyExpenses) }
 
     Column(
         modifier = Modifier
@@ -1290,7 +1464,37 @@ private fun SpendingTab(
             LoadingStateCard(text = "Loading expenses...")
             return
         }
-        StatCard(title = "This month", value = "$${"%.2f".format(totalSpend)}", modifier = Modifier.fillMaxWidth())
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            StatCard(
+                title = if (range == "weekly") "This week" else "This month",
+                value = "$${"%.2f".format(totalSpend)}",
+                modifier = Modifier.weight(1f)
+            )
+            Spacer(modifier = Modifier.width(12.dp))
+            Box {
+                OutlinedButton(onClick = { isRangeMenuOpen = true }) {
+                    Text(text = if (range == "weekly") "Weekly" else "Monthly")
+                }
+                DropdownMenu(
+                    expanded = isRangeMenuOpen,
+                    onDismissRequest = { isRangeMenuOpen = false }
+                ) {
+                    listOf("weekly", "monthly").forEach { option ->
+                        DropdownMenuItem(
+                            text = { Text(if (option == "weekly") "Weekly" else "Monthly") },
+                            onClick = {
+                                range = option
+                                isRangeMenuOpen = false
+                            }
+                        )
+                    }
+                }
+            }
+        }
         Spacer(modifier = Modifier.height(12.dp))
         StatCard(
             title = "Top category",
@@ -1312,6 +1516,31 @@ private fun SpendingTab(
             CategoryRow(categories = categories, onClick = {})
         }
         Spacer(modifier = Modifier.height(20.dp))
+        SectionHeader(title = "Budgets")
+        when {
+            !budgetsLoaded -> LoadingStateCard(text = "Loading budgets...")
+            budgets.isEmpty() -> EmptyStateCard(text = "No budgets yet. Add one to track alerts.")
+            else -> {
+                budgets.forEach { budget ->
+                    val spendMap = if (budget.period == "weekly") weeklyByCategory else monthlyByCategory
+                    val spent = spendMap[budget.category] ?: 0.0
+                    val overBy = spent - budget.limit
+                    BudgetRow(
+                        budget = budget,
+                        spent = spent,
+                        overBy = overBy,
+                        onDelete = { onDeleteBudget(budget) }
+                    )
+                }
+            }
+        }
+        OutlinedButton(
+            onClick = { isAddBudgetOpen = true },
+            modifier = Modifier.padding(top = 8.dp)
+        ) {
+            Text(text = "Add budget")
+        }
+        Spacer(modifier = Modifier.height(20.dp))
         SectionHeader(title = "Recent activity")
         if (recentExpenses.isEmpty()) {
             EmptyStateCard(text = "No recent expenses.")
@@ -1330,6 +1559,16 @@ private fun SpendingTab(
                 }
             }
         }
+    }
+
+    if (isAddBudgetOpen) {
+        AddBudgetDialog(
+            onDismiss = { isAddBudgetOpen = false },
+            onSave = { category, limit, period ->
+                onSaveBudget(category, limit, period)
+                isAddBudgetOpen = false
+            }
+        )
     }
 }
 
@@ -1353,6 +1592,8 @@ private fun ProfileTab(
     }
     var inviteCode by remember { mutableStateOf<String?>(null) }
     var inviteExpiresAt by remember { mutableStateOf<Timestamp?>(null) }
+    var isDisbandOpen by remember { mutableStateOf(false) }
+    var disbandPhrase by remember { mutableStateOf("") }
     val isOwner = familyOwnerId != null && familyOwnerId == userId
 
     Column(
@@ -1531,22 +1772,7 @@ private fun ProfileTab(
         } else if (members.size == 1) {
             OutlinedButton(
                 onClick = {
-                    if (familyId.isNullOrBlank()) {
-                        Toast.makeText(context, "Family not ready yet", Toast.LENGTH_SHORT).show()
-                        return@OutlinedButton
-                    }
-                    disbandFamily(
-                        db = db,
-                        familyId = familyId,
-                        userId = userId,
-                        onSuccess = {
-                            onFamilyCleared()
-                            Toast.makeText(context, "Family disbanded", Toast.LENGTH_SHORT).show()
-                        },
-                        onError = { message ->
-                            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
-                        }
-                    )
+                    isDisbandOpen = true
                 }
             ) {
                 Text(text = "Disband family")
@@ -1562,6 +1788,74 @@ private fun ProfileTab(
         OutlinedButton(onClick = onSignOut) {
             Text(text = "Sign out")
         }
+    }
+
+    if (isDisbandOpen) {
+        val confirmation = "DISBAND"
+        AlertDialog(
+            onDismissRequest = {
+                isDisbandOpen = false
+                disbandPhrase = ""
+            },
+            title = { Text("Disband family") },
+            text = {
+                Column {
+                    Text(
+                        text = "This permanently deletes lists, items, expenses, and invites.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Type $confirmation to confirm.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    TextField(
+                        value = disbandPhrase,
+                        onValueChange = { disbandPhrase = it },
+                        label = { Text("Confirmation") },
+                        singleLine = true
+                    )
+                }
+            },
+            confirmButton = {
+                OutlinedButton(
+                    enabled = disbandPhrase == confirmation,
+                    onClick = {
+                        if (familyId.isNullOrBlank()) {
+                            Toast.makeText(context, "Family not ready yet", Toast.LENGTH_SHORT).show()
+                            return@OutlinedButton
+                        }
+                        disbandFamily(
+                            db = db,
+                            familyId = familyId,
+                            userId = userId,
+                            onSuccess = {
+                                onFamilyCleared()
+                                Toast.makeText(context, "Family disbanded", Toast.LENGTH_SHORT).show()
+                                isDisbandOpen = false
+                                disbandPhrase = ""
+                            },
+                            onError = { message ->
+                                Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                            }
+                        )
+                    }
+                ) {
+                    Text("Disband")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = {
+                        isDisbandOpen = false
+                        disbandPhrase = ""
+                    }
+                ) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 }
 
@@ -1726,6 +2020,51 @@ private fun ActivityRow(label: String, value: String, onClick: () -> Unit = {}) 
         Text(text = label)
         Text(text = value, fontWeight = FontWeight.SemiBold)
     }
+}
+
+@Composable
+private fun SuggestionRow(
+    name: String,
+    count: Long,
+    lastBoughtAt: Timestamp?,
+    onAdd: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(text = name, fontWeight = FontWeight.SemiBold)
+                val detail = buildString {
+                    append("Bought ")
+                    append(count)
+                    append("x")
+                    if (lastBoughtAt != null) {
+                        append(" • last ")
+                        append(formatTimestamp(lastBoughtAt))
+                    }
+                }
+                Text(
+                    text = detail,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            IconButton(onClick = onAdd) {
+                Icon(imageVector = Icons.Filled.Add, contentDescription = "Add suggested item")
+            }
+        }
+    }
+
 }
 
 @Composable
@@ -1948,6 +2287,53 @@ private fun CategoryRow(categories: List<String>, onClick: () -> Unit) {
 }
 
 @Composable
+private fun BudgetRow(
+    budget: BudgetDoc,
+    spent: Double,
+    overBy: Double,
+    onDelete: () -> Unit
+) {
+    val overBudget = overBy > 0.0
+    val statusColor = if (overBudget) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+    val statusText = if (overBudget) {
+        "Over by $${"%.2f".format(overBy)}"
+    } else {
+        "$${"%.2f".format(budget.limit - spent)} left"
+    }
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(text = "${budget.category} (${formatFilterLabel(budget.period)})", fontWeight = FontWeight.SemiBold)
+                Text(
+                    text = "Spent $${"%.2f".format(spent)} / $${"%.2f".format(budget.limit)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = statusText,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = statusColor
+                )
+            }
+            IconButton(onClick = onDelete) {
+                Icon(imageVector = Icons.Filled.Delete, contentDescription = "Delete budget")
+            }
+        }
+    }
+}
+
+@Composable
 private fun CategoryPill(label: String, color: Color, onClick: () -> Unit = {}) {
     Surface(
         color = color.copy(alpha = 0.15f),
@@ -2025,10 +2411,34 @@ private fun ConfirmDeleteDialog(
     )
 }
 
+private fun filterExpensesByRange(expenses: List<ExpenseDoc>, range: String): List<ExpenseDoc> {
+    val days = if (range == "weekly") 7 else 30
+    val cutoffSeconds = Timestamp.now().seconds - days * 86_400L
+    return expenses.filter { exp -> (exp.date?.seconds ?: 0L) >= cutoffSeconds }
+}
+
+private fun sumByCategory(expenses: List<ExpenseDoc>): Map<String, Double> {
+    return expenses
+        .groupBy { it.category ?: "General" }
+        .mapValues { entry -> entry.value.sumOf { it.amount } }
+}
+
 private fun formatTimestamp(timestamp: Timestamp): String {
     val date = Date(timestamp.seconds * 1000)
     val formatter = SimpleDateFormat("MMM d", Locale.getDefault())
     return formatter.format(date)
+}
+
+private fun suggestionDocId(familyId: String, itemName: String): String {
+    val normalized = itemName.trim().lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_')
+    val safe = if (normalized.isBlank()) "item" else normalized
+    return "${familyId}_$safe"
+}
+
+private fun budgetDocId(familyId: String, category: String, period: String): String {
+    val normalized = category.trim().lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_')
+    val safe = if (normalized.isBlank()) "general" else normalized
+    return "${familyId}_${period}_$safe"
 }
 
 private fun generateInviteCode(): String {
@@ -2132,6 +2542,7 @@ private fun deleteFamilyData(
         "expenses",
         "categories",
         "suggestions",
+        "budgets",
         "invites"
     )
     deleteByFamilyCollections(
@@ -2251,6 +2662,95 @@ private fun AddExpenseDialog(onDismiss: () -> Unit, onSave: (String, String) -> 
         confirmButton = {
             OutlinedButton(onClick = { onSave(amount, category) }) {
                 Text("Add")
+            }
+        },
+        dismissButton = {
+            OutlinedButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+private fun recordSuggestion(
+    db: FirebaseFirestore,
+    familyId: String,
+    itemName: String,
+    userId: String
+) {
+    val trimmed = itemName.trim()
+    if (trimmed.isEmpty()) {
+        return
+    }
+    val suggestionId = suggestionDocId(familyId, trimmed)
+    val ref = db.collection("suggestions").document(suggestionId)
+    db.runTransaction { transaction ->
+        val snapshot = transaction.get(ref)
+        val currentCount = snapshot.getLong("count") ?: 0L
+        val data = mutableMapOf<String, Any?>(
+            "familyId" to familyId,
+            "itemName" to trimmed,
+            "count" to currentCount + 1,
+            "lastBoughtAt" to FieldValue.serverTimestamp(),
+            "updatedAt" to FieldValue.serverTimestamp()
+        )
+        if (!snapshot.exists()) {
+            data["createdAt"] = FieldValue.serverTimestamp()
+            data["createdBy"] = userId
+        }
+        transaction.set(ref, data, SetOptions.merge())
+    }
+}
+
+@Composable
+private fun AddBudgetDialog(onDismiss: () -> Unit, onSave: (String, String, String) -> Unit) {
+    var limit by remember { mutableStateOf("") }
+    var category by remember { mutableStateOf("") }
+    var period by remember { mutableStateOf("monthly") }
+    var isPeriodMenuOpen by remember { mutableStateOf(false) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Add budget") },
+        text = {
+            Column {
+                TextField(
+                    value = category,
+                    onValueChange = { category = it },
+                    label = { Text("Category") },
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                TextField(
+                    value = limit,
+                    onValueChange = { limit = it },
+                    label = { Text("Limit") },
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                Box {
+                    OutlinedButton(onClick = { isPeriodMenuOpen = true }) {
+                        Text(text = if (period == "weekly") "Weekly" else "Monthly")
+                    }
+                    DropdownMenu(
+                        expanded = isPeriodMenuOpen,
+                        onDismissRequest = { isPeriodMenuOpen = false }
+                    ) {
+                        listOf("weekly", "monthly").forEach { option ->
+                            DropdownMenuItem(
+                                text = { Text(if (option == "weekly") "Weekly" else "Monthly") },
+                                onClick = {
+                                    period = option
+                                    isPeriodMenuOpen = false
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            OutlinedButton(onClick = { onSave(category, limit, period) }) {
+                Text("Save")
             }
         },
         dismissButton = {

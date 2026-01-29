@@ -13,18 +13,18 @@ Android-only prototype for a shared family shopping + spending app.
 - Android app scaffold with Jetpack Compose.
 - Firebase Auth + Firestore dependencies added.
 - Login screen with Google sign-in (ready once web client ID is set).
-- Prototype email-only login for quick testing.
 - Create/Join family flow wired to Firestore with invite codes.
 - Basic home screen after family creation/join.
 - Documentation for MVP scope, data model, and security rules.
+- Budgets, analytics ranges, and suggestions wired to Firestore.
+- Offline persistence enabled for Firestore.
 
 ## Next planned work
 - Persist user + family selection across launches.
 - Shared lists screen with real-time updates.
 - Items CRUD (add/edit/mark bought/assign).
 - Spending log + categories + simple analytics.
-- Replace prototype email login with Google OAuth only.
-- Apply Firestore security rules.
+- Apply Firestore security rules + indexes in Firebase.
 
 ## Quick start (Android Studio)
 1) Open this folder in Android Studio.
