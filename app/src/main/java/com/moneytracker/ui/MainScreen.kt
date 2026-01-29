@@ -66,6 +66,7 @@ import androidx.compose.material.icons.filled.Payments
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.material3.AlertDialog
 import android.widget.Toast
@@ -77,6 +78,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.launch
+import kotlin.random.Random
 
 private data class AppTab(
     val key: String,
@@ -622,6 +624,7 @@ fun MainScreen(
                         ProfileTab(
                             signedInLabel = signedInLabel,
                             familyName = familyName,
+                            familyId = familyId,
                             userId = userId,
                             currentDisplayName = currentName,
                             onSignOut = onSignOut
@@ -1319,15 +1322,19 @@ private fun SpendingTab(
 private fun ProfileTab(
     signedInLabel: String,
     familyName: String,
+    familyId: String?,
     userId: String,
     currentDisplayName: String?,
     onSignOut: () -> Unit
 ) {
     val context = LocalContext.current
     val db = remember { FirebaseFirestore.getInstance() }
+    val clipboard = LocalClipboardManager.current
     var displayName by remember(currentDisplayName) {
         mutableStateOf(currentDisplayName ?: signedInLabel)
     }
+    var inviteCode by remember { mutableStateOf<String?>(null) }
+    var inviteExpiresAt by remember { mutableStateOf<Timestamp?>(null) }
 
     Column(
         modifier = Modifier
@@ -1371,6 +1378,62 @@ private fun ProfileTab(
             modifier = Modifier.padding(top = 12.dp)
         ) {
             Text(text = "Save")
+        }
+        Spacer(modifier = Modifier.height(20.dp))
+        SectionHeader(title = "Invite members")
+        OutlinedButton(
+            onClick = {
+                if (familyId.isNullOrBlank()) {
+                    Toast.makeText(context, "Family not ready yet", Toast.LENGTH_SHORT).show()
+                    return@OutlinedButton
+                }
+                val code = generateInviteCode()
+                val expiresAt = Timestamp.now().let { ts ->
+                    Timestamp(ts.seconds + 1800, ts.nanoseconds)
+                }
+                val data = mapOf(
+                    "familyId" to familyId,
+                    "createdBy" to userId,
+                    "expiresAt" to expiresAt,
+                    "createdAt" to FieldValue.serverTimestamp()
+                )
+                db.collection("invites").document(code)
+                    .set(data)
+                    .addOnSuccessListener {
+                        inviteCode = code
+                        inviteExpiresAt = expiresAt
+                        Toast.makeText(context, "Invite code generated", Toast.LENGTH_SHORT).show()
+                    }
+                    .addOnFailureListener { e ->
+                        Toast.makeText(
+                            context,
+                            e.message ?: "Failed to generate invite",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+            }
+        ) {
+            Text(text = "Generate invite code")
+        }
+        inviteCode?.let { code ->
+            Spacer(modifier = Modifier.height(12.dp))
+            StatCard(title = "Invite code", value = code, modifier = Modifier.fillMaxWidth())
+            inviteExpiresAt?.let { expiresAt ->
+                Text(
+                    text = "Expires ${formatTimestamp(expiresAt)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(top = 6.dp)
+                )
+            }
+            OutlinedButton(
+                onClick = {
+                    clipboard.setText(androidx.compose.ui.text.AnnotatedString(code))
+                    Toast.makeText(context, "Code copied", Toast.LENGTH_SHORT).show()
+                },
+                modifier = Modifier.padding(top = 8.dp)
+            ) {
+                Text(text = "Copy code")
+            }
         }
         Spacer(modifier = Modifier.height(20.dp))
         OutlinedButton(onClick = onSignOut) {
@@ -1843,6 +1906,11 @@ private fun formatTimestamp(timestamp: Timestamp): String {
     val date = Date(timestamp.seconds * 1000)
     val formatter = SimpleDateFormat("MMM d", Locale.getDefault())
     return formatter.format(date)
+}
+
+private fun generateInviteCode(): String {
+    val code = Random.nextInt(0, 1_000_000)
+    return code.toString().padStart(6, '0')
 }
 
 private fun formatFilterLabel(value: String): String {
